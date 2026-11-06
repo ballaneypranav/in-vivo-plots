@@ -1,0 +1,6 @@
+# Real study data: never commit
+private/
+
+# Local tooling
+.venv/
+__pycache__/
