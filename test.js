@@ -5,7 +5,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { parseNote, derive, summarize, tumorVolume } = require('./app.js');
+const { parseNote, derive, summarize, tumorVolume, cleanGrouping, applyGroups, distribute, groupLabel, UNGROUPED } = require('./app.js');
 
 const demo = fs.readFileSync(path.join(__dirname, 'demo', 'synthetic-demo.md'), 'utf8');
 const HEADER = '| Cage No. | Mouse No. | Body Weight (g) | Tumor Length | Tumor Breadth |\n|---:|---:|---:|---:|---:|';
@@ -146,4 +146,56 @@ test('empty or unrelated text gives no sessions and no crash', () => {
     assert.deepEqual(d.mice, []);
     assert.equal(d.latestDate, null);
   }
+});
+
+// Deterministic stand-in for Math.random.
+const seeded = seed => () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; };
+
+test('cleanGrouping drops malformed groups and assignments', () => {
+  const g = cleanGrouping({
+    groups: [{ id: 'g1', label: 'Vehicle' }, { id: 'g1', label: 'dup' }, { id: UNGROUPED }, { id: 'g2' }, null, 'x'],
+    assign: { '1-1': 'g1', '1-2': 'g9', '9-9': 'g2' },
+  });
+  assert.deepEqual(g.groups, [{ id: 'g1', label: 'Vehicle' }, { id: 'g2', label: '' }]);
+  assert.deepEqual(g.assign, { '1-1': 'g1', '9-9': 'g2' }, 'unknown mice are kept, unknown groups dropped');
+  assert.deepEqual(cleanGrouping(null), { groups: [], assign: {} });
+  assert.equal(groupLabel(g, 'g2'), 'Group 2', 'a blank label falls back to its position');
+});
+
+test('applyGroups re-keys the derived data by group', () => {
+  const d = derive(parseNote(demo));
+  const grouping = cleanGrouping({
+    groups: [{ id: 'b', label: 'Drug' }, { id: 'a', label: 'Vehicle' }],
+    assign: { '1-1': 'a', '2-1': 'a', '3-1': 'b', '1-2': 'b', 'gone-1': 'a' },
+  });
+  const g = applyGroups(d, grouping);
+  assert.equal(g.unit, 'group');
+  assert.deepEqual(g.cages, ['b', 'a', UNGROUPED], 'user order, then the mice in no group');
+  assert.deepEqual(g.labels, { b: 'Drug', a: 'Vehicle', [UNGROUPED]: 'Not grouped' });
+  assert.deepEqual(g.mice.slice(0, 4).map(m => `${m.id}:${m.cage}:${m.realCage}`), ['1-2:b:1', '3-1:b:3', '1-1:a:1', '2-1:a:2']);
+  assert.equal(g.mice.length, d.mice.length);
+  assert.deepEqual(g.latest.map(r => r.id), g.mice.map(m => m.id));
+  const veh = g.groups.find(x => x.cage === 'a');
+  assert.deepEqual(veh.mice, ['1-1', '2-1']);
+  close(veh.weight[0].mean, (21.0 + 24.2) / 2);
+  assert.equal(d.unit, 'cage');
+  assert.equal(d.mice[0].cage, '1', 'the by-cage data is not changed');
+});
+
+test('distribute: every mouse placed, sizes within one, balanced by rank', () => {
+  const rows = Array.from({ length: 20 }, (_, i) => ({ id: `m${i}`, volume: i === 19 ? null : (i + 1) * 10, weight: 20 }));
+  const ids = ['g1', 'g2', 'g3'];
+  for (const by of ['volume', 'weight', 'random']) {
+    const out = distribute(rows, ids, by, seeded(7));
+    assert.equal(Object.keys(out).length, 20);
+    const sizes = ids.map(g => Object.values(out).filter(x => x === g).length).sort();
+    assert.deepEqual(sizes, [6, 7, 7], by);
+  }
+  // By volume: the three largest tumors go to three different groups, and so on down the ranking.
+  const out = distribute(rows, ids, 'volume', seeded(3));
+  for (let top = 18; top >= 3; top -= 3) {
+    const block = [top, top - 1, top - 2].map(i => out[`m${i}`]);
+    assert.equal(new Set(block).size, 3, `block ending m${top - 2}`);
+  }
+  assert.deepEqual(distribute(rows, [], 'volume'), {});
 });

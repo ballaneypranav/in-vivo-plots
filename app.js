@@ -205,14 +205,7 @@ function derive(parsed) {
   }
 
   const cages = [...new Set(mice.map(m => m.cage))].sort(byNatural);
-  const groups = cages.map(cage => {
-    const members = mice.filter(m => m.cage === cage);
-    const series = metric => dates.map((date, k) => ({ date, ...summarize(members.map(m => m.points[k][metric])) }));
-    return {
-      cage, mice: members.map(m => m.id),
-      pct: series('pct'), weight: series('weight'), volume: series('volume'), rtv: series('rtv'),
-    };
-  });
+  const groups = summarizeGroups(mice, cages, dates);
 
   const latest = mice.map(m => {
     const p = m.points[m.points.length - 1] || {};
@@ -230,7 +223,95 @@ function derive(parsed) {
     };
   });
 
-  return { dates, days, latestDate, mice, cages, groups, latest };
+  return { unit: 'cage', dates, days, latestDate, mice, cages, groups, latest };
+}
+
+/** Per-group mean ± SEM of every metric at every session. `keys` are the values of m.cage, in display order. */
+function summarizeGroups(mice, keys, dates) {
+  return keys.map(cage => {
+    const members = mice.filter(m => m.cage === cage);
+    const series = metric => dates.map((date, k) => ({ date, ...summarize(members.map(m => m.points[k][metric])) }));
+    return {
+      cage, mice: members.map(m => m.id),
+      pct: series('pct'), weight: series('weight'), volume: series('volume'), rtv: series('rtv'),
+    };
+  });
+}
+
+/* ----------------------------------------------------------------- groups */
+// The user's own groups (e.g. treatment arms), kept on the device per note, not in the note:
+// { groups: [{ id, label }], assign: { mouseId: groupId } }. Ids are opaque so a group can be renamed.
+
+const UNGROUPED = '_none';
+
+/** A saved grouping with anything malformed dropped. Assignments to unknown mice are kept (they are ignored). */
+function cleanGrouping(raw) {
+  const groups = [];
+  const ids = new Set();
+  for (const g of raw && Array.isArray(raw.groups) ? raw.groups : []) {
+    if (!g || typeof g.id !== 'string' || !g.id || g.id === UNGROUPED || ids.has(g.id)) continue;
+    ids.add(g.id);
+    groups.push({ id: g.id, label: typeof g.label === 'string' ? g.label : '' });
+  }
+  const assign = {};
+  const a = raw && raw.assign && typeof raw.assign === 'object' ? raw.assign : {};
+  for (const [mouse, gid] of Object.entries(a)) if (ids.has(gid)) assign[mouse] = gid;
+  return { groups, assign };
+}
+
+function groupLabel(grouping, id) {
+  if (id === UNGROUPED) return 'Not grouped';
+  const k = grouping.groups.findIndex(g => g.id === id);
+  return k < 0 ? '' : grouping.groups[k].label.trim() || `Group ${k + 1}`;
+}
+
+const groupOf = (grouping, mouseId) => {
+  const gid = grouping.assign[mouseId];
+  return grouping.groups.some(g => g.id === gid) ? gid : UNGROUPED;
+};
+
+/**
+ * `derive` output re-keyed by the user's groups: every mouse's `cage` becomes its group id (the real cage
+ * moves to `realCage`), so the views aggregate and color by group unchanged. Groups keep the user's order;
+ * mice in no group go last, under UNGROUPED.
+ */
+function applyGroups(d, grouping) {
+  const keys = grouping.groups.map(g => g.id);
+  const regroup = x => ({ ...x, realCage: x.cage, cage: groupOf(grouping, x.id) });
+  let mice = d.mice.map(regroup);
+  if (mice.some(m => m.cage === UNGROUPED)) keys.push(UNGROUPED);
+  const rank = new Map(keys.map((k, i) => [k, i]));
+  const order = (a, b) => rank.get(a.cage) - rank.get(b.cage) || byNatural(a.realCage, b.realCage) || byNatural(a.mouse, b.mouse);
+  mice = mice.sort(order);
+  const latest = d.latest.map(regroup).sort(order);
+  const labels = Object.fromEntries(keys.map(k => [k, groupLabel(grouping, k)]));
+  return { ...d, unit: 'group', mice, cages: keys, labels, groups: summarizeGroups(mice, keys, d.dates), latest };
+}
+
+/**
+ * Deal `rows` ({ id, volume, weight, ... }) into the groups so group sizes differ by at most one.
+ * by = 'volume' or 'weight': rank the mice by that value (largest first, unmeasured last) and send each run of
+ * k mice (k groups) one to each group in a random order, so the group means stay close. by = 'random': plain
+ * shuffle. Returns { mouseId: groupId }. `rand` returns [0, 1) (injectable for tests).
+ */
+function distribute(rows, groupIds, by, rand = Math.random) {
+  const k = groupIds.length;
+  if (!k) return {};
+  const shuffle = a => {
+    for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(rand() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
+    return a;
+  };
+  let order = shuffle([...rows]); // random order breaks ties
+  if (by !== 'random') {
+    const v = r => (r[by] === null || r[by] === undefined ? -Infinity : r[by]);
+    order = order.map((r, i) => [r, i]).sort((a, b) => (v(b[0]) > v(a[0])) - (v(b[0]) < v(a[0])) || a[1] - b[1]).map(x => x[0]);
+  }
+  const out = {};
+  for (let i = 0; i < order.length; i += k) {
+    const perm = shuffle([...groupIds]);
+    order.slice(i, i + k).forEach((r, j) => { out[r.id] = perm[j]; });
+  }
+  return out;
 }
 
 /* ----------------------------------------------------------------- render */
@@ -261,6 +342,7 @@ const PREF_VALUES = {
   theme: ['auto', 'light', 'dark'],
   order: ['value', 'mouse'],     // per-mouse bar charts
   heat: ['pct', 'weight', 'volume', 'rtv'],
+  by: ['cage', 'group'],         // aggregate and color by cage or by the user's groups
 };
 const SORT_KEYS = ['id', 'weight', 'pct', 'volume', 'rtv', 'flags'];
 
@@ -269,7 +351,7 @@ function loadPrefs() {
   try { saved = JSON.parse(store.get(STORE_PREFS) || '{}') || {}; } catch { saved = {}; }
   const prefs = {};
   for (const [k, vals] of Object.entries(PREF_VALUES)) prefs[k] = vals.includes(saved[k]) ? saved[k] : vals[0];
-  prefs.hidden = Array.isArray(saved.hidden) ? saved.hidden.filter(c => typeof c === 'string') : [];
+  for (const k of ['hidden', 'hiddenGroups']) prefs[k] = Array.isArray(saved[k]) ? saved[k].filter(c => typeof c === 'string') : [];
   const s = saved.sort || {};
   prefs.sort = { key: SORT_KEYS.includes(s.key) ? s.key : 'id', dir: s.dir === -1 ? -1 : 1 };
   return prefs;
@@ -280,6 +362,12 @@ const state = {
   focus: null,      // highlighted mouse id
   expanded: null,   // id of the card shown full screen
   views: {},        // id -> { title, subtitle, chart?, rows() } for the export tools
+  base: null,       // derive() output, by cage; state.derived is this or applyGroups(base)
+  grouping: { groups: [], assign: {} },
+  selected: new Set(), // mice ticked in the groups panel
+  panel: false,     // groups panel open
+  panelSort: 'mouse',
+  minVolume: '',    // "Tumor vol. ≥" box in the groups panel
 };
 
 const savePrefs = () => store.set(STORE_PREFS, JSON.stringify(state.prefs));
@@ -319,10 +407,17 @@ const seriesStyle = (t, k) => ({ color: t.series[k % 8], dash: k >= 8 ? [6, 4] :
 const seriesVar = k => `var(--series-${(k % 8) + 1})`;
 const dim = color => `${color}2e`; // hex + alpha
 
+// In group mode d.cages holds group ids; hidden ones are remembered separately from hidden cages.
+const hiddenKey = d => (d.unit === 'group' ? 'hiddenGroups' : 'hidden');
 const shownCages = d => {
-  const shown = d.cages.filter(c => !state.prefs.hidden.includes(c));
+  const shown = d.cages.filter(c => !state.prefs[hiddenKey(d)].includes(c));
   return shown.length ? shown : d.cages;
 };
+const cageName = (d, c) => (d.unit === 'group' ? d.labels[c] : `Cage ${c}`);
+const cageText = (d, c) => (d.unit === 'group' ? d.labels[c] : c); // for chips and CSV
+// Mouse identity columns for CSV: in group mode the real cage and the group label.
+const idHead = d => (d.unit === 'group' ? ['mouse', 'cage', 'group'] : ['mouse', 'cage']);
+const idVals = (d, m) => (d.unit === 'group' ? [m.id, m.realCage, d.labels[m.cage]] : [m.id, m.cage]);
 const xv = (d, k) => (state.prefs.x === 'day' ? d.days[k] : ts(d.dates[k]));
 const errName = () => ({ sem: 'SEM', sd: 'SD', none: '' }[state.prefs.error]);
 
@@ -488,7 +583,7 @@ function chartOptions(t, d, metric) {
 function cageLegend(t, d, pointStyle = 'circle') {
   return {
     generateLabels: () => d.cages.map((c, k) => ({
-      text: `Cage ${c}`, fillStyle: seriesStyle(t, k).color, strokeStyle: seriesStyle(t, k).color,
+      text: cageName(d, c), fillStyle: seriesStyle(t, k).color, strokeStyle: seriesStyle(t, k).color,
       fontColor: t.ink2, pointStyle, lineWidth: 0, hidden: !shownCages(d).includes(c), cage: c,
     })),
     onClick: (_e, item) => toggleCage(item.cage),
@@ -559,7 +654,7 @@ function renderGroupChart(root, t, d, id, metric, title) {
   const what = { pct: '% change from each mouse’s first recorded weight', weight: 'body weight',
     volume: 'longer side × shorter side² / 2', rtv: 'each mouse’s volume ÷ its first measured volume' }[metric];
   const sub = `${errName() ? `Mean ± ${errName()}` : 'Mean'} of ${what}.`;
-  const sec = card(id, title, sub, CHART_TOOLS, { hint: 'Click a cage in the legend to hide it.' });
+  const sec = card(id, title, sub, CHART_TOOLS, { hint: `Click a ${d.unit} in the legend to hide it.` });
   root.appendChild(sec);
   const shown = shownCages(d);
   if (!d.groups.some(g => shown.includes(g.cage) && g[metric].some(p => p.n > 0))) {
@@ -580,7 +675,7 @@ function renderGroupChart(root, t, d, id, metric, title) {
     const err = errKey === 'none' ? null
       : pts.map(p => (p.sem === null ? null : errKey === 'sd' ? p.sem * Math.sqrt(p.n) : p.sem));
     return {
-      label: `Cage ${g.cage}`, cage: g.cage, hidden: !shown.includes(g.cage),
+      label: cageName(d, g.cage), cage: g.cage, hidden: !shown.includes(g.cage),
       data: pts.map((p, i) => ({ x: xs[i] + nudge, y: p.mean, date: p.date, day: d.days[i], n: p.n, err: err ? err[i] : null })),
       err,
       borderColor: color, backgroundColor: color, borderDash: dash,
@@ -595,9 +690,9 @@ function renderGroupChart(root, t, d, id, metric, title) {
     `${c.dataset.label}: ${M.val(c.raw.y)}${c.raw.err !== null ? ` ± ${M.err(c.raw.err)}` : ''} (n=${c.raw.n})`;
   state.views[id].chart = makeChart(chartBox(sec), { type: 'line', data: { datasets }, options: opts });
   state.views[id].rows = () => [
-    ['cage', 'date', 'study_day', 'mean', 'sem', 'sd', 'n'],
+    [d.unit, 'date', 'study_day', 'mean', 'sem', 'sd', 'n'],
     ...d.groups.filter(g => shown.includes(g.cage)).flatMap(g => g[metric].map((p, i) => [
-      g.cage, p.date, d.days[i], num(p.mean), num(p.sem), num(p.sem === null ? null : p.sem * Math.sqrt(p.n)), p.n])),
+      cageText(d, g.cage), p.date, d.days[i], num(p.mean), num(p.sem), num(p.sem === null ? null : p.sem * Math.sqrt(p.n)), p.n])),
   ];
 }
 
@@ -620,8 +715,8 @@ function renderMiceChart(root, t, d, id, metric, title) {
   const shown = shownCages(d);
   const mice = d.mice.filter(m => shown.includes(m.cage));
   state.views[id].rows = () => [
-    ['mouse', 'cage', 'date', 'study_day', metric],
-    ...mice.flatMap(m => m.points.map(p => [m.id, m.cage, p.date, p.day, num(p[metric])])),
+    [...idHead(d), 'date', 'study_day', metric],
+    ...mice.flatMap(m => m.points.map(p => [...idVals(d, m), p.date, p.day, num(p[metric])])),
   ];
   if (!mice.some(m => m.points.some(p => p[metric] !== null))) {
     empty(sec, M.tumor ? 'No tumor measurements yet.' : 'No measurements yet.');
@@ -680,7 +775,7 @@ function renderLatestBars(root, t, d, id, metric, title) {
   const order = segControl('order', 'Order', [['value', 'Sorted', 'Largest first'], ['mouse', 'Mouse', 'By cage and mouse']]);
   const sec = card(id, title, sub, CHART_TOOLS, { extra: order, hint: 'Click a bar to highlight the mouse.' });
   root.appendChild(sec);
-  state.views[id].rows = () => [['mouse', 'cage', 'date', metric], ...rows.map(r => [r.id, r.cage, d.latestDate, num(r[metric])])];
+  state.views[id].rows = () => [[...idHead(d), 'date', metric], ...rows.map(r => [...idVals(d, r), d.latestDate, num(r[metric])])];
   if (!rows.length) {
     empty(sec, M.tumor ? 'No tumor measurements in the latest session.' : 'No measurements in the latest session.');
     return;
@@ -698,7 +793,7 @@ function renderLatestBars(root, t, d, id, metric, title) {
   opts.plugins.legend.labels.generateLabels = cageLegend(t, d, 'rect').generateLabels;
   opts.plugins.legend.onClick = cageLegend(t, d).onClick;
   opts.plugins.tooltip.callbacks.title = items => (items.length ? `Mouse ${rows[items[0].dataIndex].id}` : '');
-  opts.plugins.tooltip.callbacks.label = c => `${M.val(c.raw)} · Cage ${rows[c.dataIndex].cage}`;
+  opts.plugins.tooltip.callbacks.label = c => `${M.val(c.raw)} · ${cageName(d, rows[c.dataIndex].cage)}`;
   opts.onHover = (e, els) => { e.native.target.style.cursor = els.length ? 'pointer' : ''; };
   opts.onClick = (_e, els) => { if (els.length) setFocus(rows[els[0].index].id, true); };
   const datasets = [{
@@ -727,11 +822,14 @@ const TABLE_COLS = [
   { key: 'flags', label: 'Flags' },
 ];
 
-function sortRows(rows) {
+function sortRows(d, rows) {
   const { key, dir } = state.prefs.sort;
   const val = r => (key === 'flags' ? FLAG_RANK(r) : r[key]);
+  const pos = r => d.cages.indexOf(r.cage);
   return [...rows].sort((a, b) => {
-    if (key === 'id') return dir * (byNatural(a.cage, b.cage) || byNatural(a.mouse, b.mouse));
+    if (key === 'id') {
+      return dir * (pos(a) - pos(b) || byNatural(a.realCage ?? a.cage, b.realCage ?? b.cage) || byNatural(a.mouse, b.mouse));
+    }
     const va = val(a), vb = val(b);
     if (va === null && vb === null) return 0;
     if (va === null) return 1; // not measured: always last
@@ -745,7 +843,7 @@ const mouseCell = (d, id, cage) =>
 
 function renderLatestTable(root, d) {
   const shown = shownCages(d);
-  const rows = sortRows(d.latest.filter(r => shown.includes(r.cage)));
+  const rows = sortRows(d, d.latest.filter(r => shown.includes(r.cage)));
   const sec = card('table', `Latest values · ${fmtDate(ts(d.latestDate), { month: 'short', day: 'numeric', year: 'numeric' })}`,
     'Change is from each mouse’s first recorded weight.', TABLE_TOOLS, { hint: 'Click a column to sort, a row to highlight the mouse.' });
   const counts = {};
@@ -771,8 +869,8 @@ function renderLatestTable(root, d) {
   sec.insertAdjacentHTML('beforeend', `<div class="table-wrap"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`);
   root.appendChild(sec);
   state.views.table.rows = () => [
-    ['mouse', 'cage', 'weight_g', 'weight_pct_change', 'tumor_volume', 'relative_tumor_volume', 'last_seen', 'flags'],
-    ...rows.map(r => [r.id, r.cage, num(r.weight), num(r.pct), num(r.volume), num(r.rtv), r.lastSeen, r.flags.join(' ')]),
+    [...idHead(d), 'weight_g', 'weight_pct_change', 'tumor_volume', 'relative_tumor_volume', 'last_seen', 'flags'],
+    ...rows.map(r => [...idVals(d, r), num(r.weight), num(r.pct), num(r.volume), num(r.rtv), r.lastSeen, r.flags.join(' ')]),
   ];
 }
 
@@ -819,8 +917,8 @@ function renderHeatmap(root, d) {
   sec.insertAdjacentHTML('beforeend', `<div class="table-wrap heat"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`);
   root.appendChild(sec);
   state.views.grid.rows = () => [
-    ['mouse', 'cage', ...d.dates],
-    ...mice.map(m => [m.id, m.cage, ...m.points.map(p => num(p[metric]))]),
+    [...idHead(d), ...d.dates],
+    ...mice.map(m => [...idVals(d, m), ...m.points.map(p => num(p[metric]))]),
   ];
 }
 
@@ -832,7 +930,7 @@ function renderKpis(d) {
   const count = f => rows.filter(r => r.flags.includes(f)).length;
   const tiles = [
     [`Day ${d.days[d.days.length - 1]}`, `latest, ${fmtDate(ts(d.latestDate))}`, ''],
-    [rows.length === d.latest.length ? rows.length : `${rows.length} / ${d.latest.length}`, `mice, ${shown.length} cage${shown.length > 1 ? 's' : ''}`, ''],
+    [rows.length === d.latest.length ? rows.length : `${rows.length} / ${d.latest.length}`, `mice, ${shown.length} ${d.unit}${shown.length > 1 ? 's' : ''}`, ''],
     [count('loss-alert'), '⛔ lost ≥ 20%', 'critical'],
     [count('loss-warning'), '⚠ lost 15–20%', 'warning'],
     [count('missing'), '○ missing latest', 'missing'],
@@ -858,10 +956,11 @@ function renderViews() {
   Chart.defaults.color = t.ink2;
   const w = state.prefs.weight;
   const tm = state.prefs.tumor;
-  renderGroupChart(root, t, d, 'weight-group', w, w === 'pct' ? 'Body weight change by cage' : 'Body weight by cage');
+  const by = `by ${d.unit}`;
+  renderGroupChart(root, t, d, 'weight-group', w, w === 'pct' ? `Body weight change ${by}` : `Body weight ${by}`);
   renderMiceChart(root, t, d, 'weight-mice', w, w === 'pct' ? 'Individual body weight change' : 'Individual body weights');
   renderLatestBars(root, t, d, 'weight-latest', w, `${w === 'pct' ? 'Weight change' : 'Body weight'} per mouse`);
-  renderGroupChart(root, t, d, 'tumor-group', tm, tm === 'rtv' ? 'Relative tumor volume by cage' : 'Tumor volume by cage');
+  renderGroupChart(root, t, d, 'tumor-group', tm, tm === 'rtv' ? `Relative tumor volume ${by}` : `Tumor volume ${by}`);
   renderMiceChart(root, t, d, 'tumor-mice', tm, tm === 'rtv' ? 'Individual relative tumor volumes' : 'Individual tumor volumes');
   renderLatestBars(root, t, d, 'tumor-latest', tm, `${tm === 'rtv' ? 'Relative tumor volume' : 'Tumor volume'} per mouse`);
   renderLatestTable(root, d);
@@ -872,12 +971,19 @@ function renderViews() {
 
 function renderToolbar(d) {
   const bar = document.getElementById('toolbar');
-  const chips = d.cages.map((c, k) => `<button type="button" class="chip" data-cage="${escapeHtml(c)}" title="Show or hide cage ${
-    escapeHtml(c)}. Double-click to show only this cage."><span class="dot" style="background:${seriesVar(k)}"></span>${escapeHtml(c)}</button>`).join('');
-  const mice = d.cages.map(c => `<optgroup label="Cage ${escapeHtml(c)}">${
+  const u = d.unit;
+  const chips = d.cages.map((c, k) => `<button type="button" class="chip" data-cage="${escapeHtml(c)}" title="Show or hide ${
+    escapeHtml(cageName(d, c))}. Double-click to show only this ${u}."><span class="dot" style="background:${seriesVar(k)}"></span>${
+    escapeHtml(cageText(d, c))}</button>`).join('');
+  const grouped = hasGroups();
+  const groupBy = `<div class="seg" role="group" aria-label="Group by"><span class="seg-label">Group by</span>${grouped
+    ? `<div class="seg-buttons"><button type="button" data-pref="by" data-value="cage">Cage</button><button type="button" data-pref="by" data-value="group" title="Your groups, set in the groups panel">My groups</button></div>`
+    : ''}<button type="button" class="chip edit" data-groups-open title="Pick mice and sort them into labelled groups">${grouped ? 'Edit groups' : 'Make groups'}</button></div>`;
+  const mice = d.cages.map(c => `<optgroup label="${escapeHtml(cageName(d, c))}">${
     d.mice.filter(m => m.cage === c).map(m => `<option value="${escapeHtml(m.id)}">${escapeHtml(m.id)}</option>`).join('')}</optgroup>`).join('');
   bar.innerHTML = `
-    <div class="seg" role="group" aria-label="Cages"><span class="seg-label">Cages</span><div class="chips">${chips}<button type="button" class="chip all" data-cage-all>All</button></div></div>
+    ${groupBy}
+    <div class="seg" role="group" aria-label="${u === 'group' ? 'Groups' : 'Cages'}"><span class="seg-label">${u === 'group' ? 'Groups' : 'Cages'}</span><div class="chips">${chips}<button type="button" class="chip all" data-cage-all>All</button></div></div>
     ${segControl('weight', 'Weight', [['pct', '% change'], ['weight', 'Grams']])}
     ${segControl('tumor', 'Tumor', [['volume', 'Volume'], ['rtv', 'Relative', 'Each mouse’s volume ÷ its first measured volume']])}
     ${segControl('scale', 'Tumor axis', [['linear', 'Linear'], ['log', 'Log']])}
@@ -911,12 +1017,22 @@ function setPref(key, value) {
   state.prefs[key] = value;
   savePrefs();
   if (key === 'theme') applyTheme();
+  if (key === 'by') { refresh(); return; }
   syncToolbar();
   renderViews();
 }
 
+/** Rebuild the view data (by cage or by group) and redraw the toolbar, views and groups panel. */
+function refresh() {
+  if (!state.base) return;
+  state.derived = state.prefs.by === 'group' && hasGroups() ? applyGroups(state.base, state.grouping) : state.base;
+  renderToolbar(state.derived);
+  renderViews();
+  renderGroupPanel();
+}
+
 function setHidden(hidden) {
-  state.prefs.hidden = hidden;
+  state.prefs[hiddenKey(state.derived)] = hidden;
   savePrefs();
   syncToolbar();
   renderViews();
@@ -939,6 +1055,272 @@ function setFocus(id, toggle = false) {
 function applyTheme() {
   const root = document.documentElement;
   if (state.prefs.theme === 'auto') delete root.dataset.theme; else root.dataset.theme = state.prefs.theme;
+}
+
+/* ----------------------------------------------------------------- groups panel */
+// Tick mice, then move them into a group or spread them evenly across the groups. Saved on this device,
+// per note name, so choosing an updated copy of the note keeps the groups.
+
+const groupsKey = name => `in-vivo-plots:groups:${name}`;
+const hasGroups = () => state.grouping.groups.length > 0;
+
+function loadGrouping(name) {
+  try { return cleanGrouping(JSON.parse(store.get(groupsKey(name)) || 'null')); } catch { return cleanGrouping(null); }
+}
+
+/** Change the grouping, save it and redraw. The first groups made switch the charts to them. */
+function updateGrouping(change) {
+  const had = hasGroups();
+  change(state.grouping);
+  state.grouping = cleanGrouping(state.grouping);
+  if (hasGroups()) store.set(groupsKey(state.name), JSON.stringify(state.grouping));
+  else store.remove(groupsKey(state.name));
+  if (!had && hasGroups()) { state.prefs.by = 'group'; savePrefs(); }
+  refresh();
+}
+
+function addGroup() {
+  updateGrouping(g => {
+    let n = 1;
+    while (g.groups.some(x => x.id === `g${n}`)) n++;
+    g.groups.push({ id: `g${n}`, label: `Group ${g.groups.length + 1}` });
+  });
+}
+
+function deleteGroup(id) {
+  const n = Object.values(state.grouping.assign).filter(g => g === id).length;
+  if (n && !confirm(`Delete “${groupLabel(state.grouping, id)}”? Its ${n} ${n > 1 ? 'mice' : 'mouse'} will be in no group.`)) return;
+  updateGrouping(g => { g.groups = g.groups.filter(x => x.id !== id); });
+}
+
+function moveSelected(gid) {
+  const ids = [...state.selected];
+  if (!ids.length) { toast('Tick some mice first.'); return; }
+  updateGrouping(g => ids.forEach(id => { if (gid === UNGROUPED) delete g.assign[id]; else g.assign[id] = gid; }));
+}
+
+function spreadSelected(by) {
+  const ids = state.selected;
+  if (!ids.size) { toast('Tick some mice first.'); return; }
+  if (state.grouping.groups.length < 2) { toast('Add at least two groups first.'); return; }
+  const rows = state.base.latest.filter(r => ids.has(r.id));
+  const out = distribute(rows, state.grouping.groups.map(g => g.id), by);
+  updateGrouping(g => Object.assign(g.assign, out));
+  toast(`${rows.length} mice spread across ${state.grouping.groups.length} groups${by === 'random' ? ' at random' : `, balanced by ${by === 'volume' ? 'tumor volume' : 'body weight'}`}. Click again to re-roll.`);
+}
+
+const SELECT_RULES = {
+  all: () => true,
+  none: () => false,
+  tumor: r => r.volume > 0,
+  ungrouped: r => groupOf(state.grouping, r.id) === UNGROUPED,
+};
+
+function selectWhere(rule) {
+  state.selected = new Set(state.base.latest.filter(rule).map(r => r.id));
+  renderGroupPanel();
+}
+
+/** Latest values of the grouped mice, by group, for copying out. */
+function groupRows() {
+  const g = state.grouping;
+  const pos = id => g.groups.findIndex(x => x.id === id);
+  const rows = state.base.latest.filter(r => groupOf(g, r.id) !== UNGROUPED)
+    .sort((a, b) => pos(groupOf(g, a.id)) - pos(groupOf(g, b.id)) || byNatural(a.cage, b.cage) || byNatural(a.mouse, b.mouse));
+  return [
+    ['group', 'mouse', 'cage', 'weight_g', 'weight_pct_change', 'tumor_volume'],
+    ...rows.map(r => [groupLabel(g, groupOf(g, r.id)), r.id, r.cage, num(r.weight), num(r.pct), num(r.volume)]),
+  ];
+}
+
+// For pasting into the Obsidian note. The columns differ from a session table, so the parser ignores it.
+function groupMarkdown() {
+  const rows = groupRows().slice(1);
+  const cell = s => String(s ?? '').replace(/\|/g, '\\|');
+  return [
+    `Groups set ${state.base.latestDate} (latest values from that session):`, '',
+    '| Group | Mouse | Weight (g) | Change (%) | Tumor volume |', '|---|---|---:|---:|---:|',
+    ...rows.map(([group, mouse, , w, pct, vol]) => `| ${cell(group)} | ${mouse} | ${fmt(w, 2)} | ${fmtSigned(pct)} | ${fmt(vol)} |`),
+  ].join('\n');
+}
+
+async function copyText(text, done) {
+  try { await navigator.clipboard.writeText(text); toast(done); } catch (e) { toast(`Couldn’t copy here (${e.message || e}).`); }
+}
+
+const meanSem = (vals, show) => {
+  const s = summarize(vals);
+  if (!s.n) return '—';
+  return s.sem === null ? show(s.mean) : `${show(s.mean)} <span class="pm">± ${show(s.sem).replace(/^[+−]/, '')}</span>`;
+};
+
+function renderGroupPanel() {
+  const box = document.getElementById('group-panel');
+  if (!box) return; // an old cached index.html
+  const open = Boolean(state.panel && state.base);
+  document.body.classList.toggle('panel-open', open);
+  if (!open) { box.hidden = true; box.innerHTML = ''; return; }
+
+  // Keep the mouse list's scroll position and the focused control across the redraw.
+  const wrap = box.querySelector('.gp-mice .table-wrap');
+  const scroll = wrap ? wrap.scrollTop : 0;
+  const a = document.activeElement;
+  const focusSel = a && box.contains(a) ? ['data-gp', 'data-move', 'data-spread', 'data-pick', 'data-del', 'data-assign', 'data-sel']
+    .filter(k => a.hasAttribute(k)).map(k => `[${k}="${CSS.escape(a.getAttribute(k))}"]`)[0] : null;
+
+  const d = state.base;
+  const g = state.grouping;
+  const of = id => groupOf(g, id);
+  const color = gid => seriesVar(gid === UNGROUPED ? g.groups.length : g.groups.findIndex(x => x.id === gid));
+  const dot = gid => `<span class="dot" style="background:${color(gid)}"></span>`;
+  const sel = state.selected;
+  const date = fmtDate(ts(d.latestDate), { month: 'short', day: 'numeric', year: 'numeric' });
+
+  const keys = [...g.groups.map(x => x.id), UNGROUPED];
+  const summary = keys.map((gid, k) => {
+    const members = d.latest.filter(r => of(r.id) === gid);
+    if (gid === UNGROUPED && !members.length) return '';
+    const label = gid === UNGROUPED ? `<span class="gp-none">${dot(gid)}Not grouped</span>`
+      : `${dot(gid)}<input type="text" class="gp-label" data-label="${gid}" value="${escapeHtml(g.groups[k].label)}" placeholder="Group ${k + 1}" aria-label="Name of group ${k + 1}" maxlength="60">`;
+    return `<tr><th scope="row">${label}</th><td>${members.length}</td>`
+      + `<td>${meanSem(members.map(r => r.volume), v => fmt(v))}</td>`
+      + `<td>${meanSem(members.map(r => r.weight), v => fmt(v, 2))}</td>`
+      + `<td>${meanSem(members.map(r => r.pct), v => `${fmtSigned(v)}%`)}</td>`
+      + `<td>${gid === UNGROUPED ? '' : `<button type="button" class="tool" data-del="${gid}" title="Delete group" aria-label="Delete group ${escapeHtml(groupLabel(g, gid))}">×</button>`}</td></tr>`;
+  }).join('');
+
+  let rows = [...d.latest];
+  if (state.panelSort === 'volume') rows.sort((x, y) => (y.volume ?? -1) - (x.volume ?? -1) || byNatural(x.id, y.id));
+  if (state.panelSort === 'group') rows.sort((x, y) => keys.indexOf(of(x.id)) - keys.indexOf(of(y.id)) || byNatural(x.cage, y.cage) || byNatural(x.mouse, y.mouse));
+  const options = gid => [...g.groups.map(x => x.id), UNGROUPED].map(id =>
+    `<option value="${id}"${id === gid ? ' selected' : ''}>${escapeHtml(groupLabel(g, id))}</option>`).join('');
+  const body = rows.map(r => {
+    const gid = of(r.id);
+    return `<tr class="${sel.has(r.id) ? 'picked' : ''}"><td class="gp-check"><input type="checkbox" data-sel="${escapeHtml(r.id)}"${sel.has(r.id) ? ' checked' : ''} aria-label="Select mouse ${escapeHtml(r.id)}"></td>`
+      + `<th scope="row">${escapeHtml(r.id)}</th><td>${fmt(r.weight, 2)}</td><td>${r.pct === null ? '—' : `${fmtSigned(r.pct)}%`}</td><td>${fmt(r.volume)}</td>`
+      + `<td class="gp-group">${dot(gid)}<select data-assign="${escapeHtml(r.id)}" aria-label="Group of mouse ${escapeHtml(r.id)}">${options(gid)}</select></td></tr>`;
+  }).join('');
+
+  const groupsReady = g.groups.length > 0;
+  const moveTo = [...g.groups.map(x => x.id), UNGROUPED].map(gid =>
+    `<button type="button" class="chip" data-move="${gid}" title="Put the ticked mice in ${escapeHtml(groupLabel(g, gid))}">${dot(gid)}<span class="lbl">${escapeHtml(groupLabel(g, gid))}</span></button>`).join('');
+  const n = sel.size;
+
+  box.innerHTML = `
+    <div class="gp-head">
+      <div class="titles"><h2 id="group-panel-title">Groups</h2>
+        <p class="sub">Tick mice, then put them in a group or spread them across the groups. Saved on this device for this note.</p></div>
+      <button type="button" class="tool" data-gp="close" title="Close (Esc)" aria-label="Close">${icon('collapse')}</button>
+    </div>
+    <div class="gp-body">
+      <section class="gp-groups" aria-label="Groups">
+        <div class="table-wrap"><table>
+          <thead><tr><th scope="col">Group</th><th scope="col">Mice</th><th scope="col" title="Mean ± SEM, ${date}">Tumor vol.</th><th scope="col" title="Mean ± SEM, ${date}">Weight (g)</th><th scope="col" title="Mean ± SEM of % change from first weight, ${date}">Change</th><th></th></tr></thead>
+          <tbody>${summary || ''}</tbody></table></div>
+        ${groupsReady ? '' : '<p class="empty">No groups yet. Add one for each cage or treatment arm, then name it.</p>'}
+        <p class="gp-note">Mean ± SEM at the latest session, ${date}. Compare the groups to check they are balanced.</p>
+        <div class="gp-actions">
+          <button type="button" class="button small primary" data-gp="add">+ Add group</button>
+          ${groupsReady ? `<button type="button" class="button small" data-gp="copy" title="Group, mouse and latest values as a table for Excel or Prism">Copy table</button>
+          <button type="button" class="button small" data-gp="markdown" title="A Markdown table to paste into the note">Copy for note</button>
+          <button type="button" class="button small" data-gp="csv">CSV</button>
+          <button type="button" class="button small quiet" data-gp="clear">Delete all groups</button>` : ''}
+        </div>
+      </section>
+      <section class="gp-mice" aria-label="Mice">
+        <div class="gp-row"><span class="seg-label">Tick</span>
+          <div class="seg-buttons">
+            <button type="button" data-pick="all">All</button><button type="button" data-pick="none">None</button>
+            <button type="button" data-pick="tumor" title="Mice with a tumor measured in the latest session">With a tumor</button>
+            <button type="button" data-pick="ungrouped">Not grouped</button></div>
+          <label class="gp-min">Tumor vol. ≥ <input type="number" min="0" step="any" inputmode="decimal" data-min value="${escapeHtml(state.minVolume ?? '')}" aria-label="Minimum tumor volume"></label>
+          <button type="button" class="button small" data-pick="min">Tick</button>
+          <span class="gp-count" aria-live="polite">${n} of ${d.latest.length} ticked</span>
+        </div>
+        <div class="gp-row"><span class="seg-label">Put ticked in</span><div class="chips">${groupsReady ? moveTo : '<span class="hint">Add a group first.</span>'}</div></div>
+        <div class="gp-row"><span class="seg-label">Spread ticked evenly, balanced by</span>
+          <div class="seg-buttons">
+            <button type="button" data-spread="volume" title="Rank by latest tumor volume; each run of mice goes one to each group, in random order">Tumor volume</button>
+            <button type="button" data-spread="weight" title="Rank by latest body weight; each run of mice goes one to each group, in random order">Body weight</button>
+            <button type="button" data-spread="random">Random</button></div>
+        </div>
+        <div class="gp-row"><span class="seg-label">Sort</span>${segPanelSort()}</div>
+        <div class="table-wrap"><table>
+          <thead><tr><th></th><th scope="col">Mouse</th><th scope="col">Weight (g)</th><th scope="col">Change</th><th scope="col">Tumor vol.</th><th scope="col">Group</th></tr></thead>
+          <tbody>${body}</tbody></table></div>
+      </section>
+    </div>`;
+  box.hidden = false;
+  box.querySelectorAll('[data-spread], [data-move]').forEach(b => { b.disabled = !n || (b.dataset.spread !== undefined && g.groups.length < 2); });
+
+  const nw = box.querySelector('.gp-mice .table-wrap');
+  if (nw) nw.scrollTop = scroll;
+  const f = focusSel && box.querySelector(focusSel);
+  if (f) f.focus();
+}
+
+const segPanelSort = () => `<div class="seg-buttons">${[['mouse', 'Mouse'], ['volume', 'Tumor vol.'], ['group', 'Group']].map(([v, text]) =>
+  `<button type="button" data-gp="sort-${v}" aria-pressed="${state.panelSort === v}">${text}</button>`).join('')}</div>`;
+
+function openGroupPanel(open) {
+  state.panel = open;
+  // Closing redraws the dashboard too: a name typed and not yet committed (Escape straight away) still shows.
+  if (open) renderGroupPanel(); else refresh();
+  if (open) { const first = document.querySelector('#group-panel [data-gp="close"]'); if (first) first.focus(); }
+  else { const btn = document.querySelector('[data-groups-open]'); if (btn) btn.focus(); }
+}
+
+function panelClick(el) {
+  const ds = el.dataset;
+  if (ds.gp === 'close') openGroupPanel(false);
+  else if (ds.gp === 'add') addGroup();
+  else if (ds.gp === 'clear') {
+    if (confirm('Delete all groups? The mice stay in the note; only the grouping is removed.')) updateGrouping(g => { g.groups = []; g.assign = {}; });
+  } else if (ds.gp === 'copy') copyText(toTsv(groupRows()), 'Groups copied. Paste them into Excel, Sheets or Prism.');
+  else if (ds.gp === 'markdown') copyText(groupMarkdown(), 'Groups copied as Markdown. Paste them into the note, under their own heading.');
+  else if (ds.gp === 'csv') download(new Blob([toCsv(groupRows())], { type: 'text/csv' }), fileName('groups', 'csv'));
+  else if (ds.gp && ds.gp.startsWith('sort-')) { state.panelSort = ds.gp.slice(5); renderGroupPanel(); }
+  else if (ds.del) deleteGroup(ds.del);
+  else if (ds.move) moveSelected(ds.move);
+  else if (ds.spread) spreadSelected(ds.spread);
+  else if (ds.pick === 'min') {
+    const v = parseFloat(state.minVolume);
+    if (!Number.isFinite(v)) { toast('Type a tumor volume first.'); return; }
+    selectWhere(r => r.volume !== null && r.volume >= v);
+  } else if (ds.pick) selectWhere(SELECT_RULES[ds.pick]);
+}
+
+function panelChange(e) {
+  const t = e.target;
+  if (t.dataset.sel !== undefined) {
+    if (t.checked) state.selected.add(t.dataset.sel); else state.selected.delete(t.dataset.sel);
+    renderGroupPanel();
+  } else if (t.dataset.assign !== undefined) {
+    updateGrouping(g => { if (t.value === UNGROUPED) delete g.assign[t.dataset.assign]; else g.assign[t.dataset.assign] = t.value; });
+  } else if (t.dataset.label !== undefined) {
+    // Saved on every keystroke (panelInput); redraw the charts once the name is done.
+    refreshKeepFocus();
+  }
+}
+
+// While a name is typed: save it and update the panel's own labels, without redrawing the input.
+function panelInput(e) {
+  const t = e.target;
+  if (t.dataset.min !== undefined) { state.minVolume = t.value; return; }
+  if (t.dataset.label === undefined) return;
+  const grp = state.grouping.groups.find(x => x.id === t.dataset.label);
+  if (!grp) return;
+  grp.label = t.value;
+  store.set(groupsKey(state.name), JSON.stringify(state.grouping));
+  const text = groupLabel(state.grouping, grp.id);
+  document.querySelectorAll(`#group-panel [data-move="${grp.id}"] .lbl, #group-panel option[value="${grp.id}"]`).forEach(x => { x.textContent = text; });
+}
+
+// Redraw the dashboard behind the panel but leave the panel (and whatever has focus in it) alone.
+function refreshKeepFocus() {
+  state.derived = state.prefs.by === 'group' && hasGroups() ? applyGroups(state.base, state.grouping) : state.base;
+  renderToolbar(state.derived);
+  renderViews();
 }
 
 /* ----------------------------------------------------------------- export */
@@ -1054,10 +1436,11 @@ function dashboardFigure(scale = 2) {
 
 /** Long ("tidy") table of every measurement and derived value. */
 function allDataRows() {
-  const d = state.derived;
+  const d = state.base;
+  const g = hasGroups() ? [m => { const id = groupOf(state.grouping, m.id); return id === UNGROUPED ? '' : groupLabel(state.grouping, id); }] : [];
   return [
-    ['mouse', 'cage', 'date', 'study_day', 'weight_g', 'weight_pct_change', 'tumor_length', 'tumor_breadth', 'tumor_volume', 'relative_tumor_volume'],
-    ...d.mice.flatMap(m => m.points.map(p => [m.id, m.cage, p.date, p.day, p.weight, num(p.pct), p.length, p.breadth, num(p.volume), num(p.rtv)])),
+    ['mouse', 'cage', ...(g.length ? ['group'] : []), 'date', 'study_day', 'weight_g', 'weight_pct_change', 'tumor_length', 'tumor_breadth', 'tumor_volume', 'relative_tumor_volume'],
+    ...d.mice.flatMap(m => m.points.map(p => [m.id, m.cage, ...g.map(f => f(m)), p.date, p.day, p.weight, num(p.pct), p.length, p.breadth, num(p.volume), num(p.rtv)])),
   ];
 }
 
@@ -1131,18 +1514,21 @@ function show(text, name, savedAt) {
   const parsed = parseNote(text);
   renderWarnings(parsed.warnings);
   if (!parsed.sessions.length) {
-    state.derived = null;
+    state.derived = state.base = null;
+    state.panel = false;
+    renderGroupPanel();
     document.getElementById('toolbar').hidden = true;
     renderViews();
     setStatus(`<strong>${escapeHtml(name)}</strong> has no measurement sessions. Each session starts with a heading like <code>## 2026-11-05</code> followed by the measurement table.`);
     return false;
   }
   const derived = derive(parsed);
-  state.derived = derived;
+  if (name !== state.name) state.selected = new Set();
+  state.base = derived;
   state.name = name;
+  state.grouping = loadGrouping(name);
   if (!derived.mice.some(m => m.id === state.focus)) state.focus = null;
-  renderToolbar(derived);
-  renderViews();
+  refresh();
   const when = savedAt ? ` · loaded ${new Date(savedAt).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}` : '';
   setStatus(`<strong>${escapeHtml(name)}</strong> · ${parsed.sessions.length} session${parsed.sessions.length > 1 ? 's' : ''}, ${derived.mice.length} mice${when}`);
   document.getElementById('forget').hidden = false;
@@ -1194,20 +1580,27 @@ function init() {
 
   document.getElementById('forget').addEventListener('click', () => {
     store.remove(STORE_NOTE);
-    state.derived = null;
+    store.remove(groupsKey(state.name));
+    state.derived = state.base = null;
+    state.grouping = { groups: [], assign: {} };
+    state.selected = new Set();
+    state.panel = false;
+    renderGroupPanel();
     state.focus = null;
     state.expanded = null;
     document.getElementById('toolbar').hidden = true;
     renderViews();
     renderWarnings([]);
     document.getElementById('forget').hidden = true;
-    setStatus('Note forgotten on this device. Choose a note to plot it.');
+    setStatus('Note and its groups forgotten on this device. Choose a note to plot it.');
   });
 
   // One click handler for the toolbar and every card.
   document.addEventListener('click', e => {
     const el = e.target.closest('button, tr[data-mouse]');
     if (!el || !state.derived) return;
+    if (el.closest('#group-panel')) { panelClick(el); return; }
+    if (el.dataset.groupsOpen !== undefined) { openGroupPanel(true); return; }
     if (el.dataset.pref) setPref(el.dataset.pref, el.dataset.value);
     else if (el.dataset.cage !== undefined) toggleCage(el.dataset.cage);
     else if (el.dataset.cageAll !== undefined) setHidden([]);
@@ -1227,10 +1620,17 @@ function init() {
     if (chip && state.derived) setHidden(state.derived.cages.filter(c => c !== chip.dataset.cage));
   });
   document.addEventListener('change', e => {
+    if (e.target.closest && e.target.closest('#group-panel')) { panelChange(e); return; }
     if (e.target.id === 'focus-mouse') setFocus(e.target.value);
     else if (e.target.dataset.prefSelect) setPref(e.target.dataset.prefSelect, e.target.value);
   });
+  document.addEventListener('input', e => { if (e.target.closest && e.target.closest('#group-panel')) panelInput(e); });
   document.addEventListener('keydown', e => {
+    if (state.panel && e.target.closest && e.target.closest('#group-panel') && e.key === 'Enter') {
+      if (e.target.dataset.label !== undefined) { e.preventDefault(); e.target.blur(); return; }
+      if (e.target.dataset.min !== undefined) { e.preventDefault(); panelClick({ dataset: { pick: 'min' } }); return; }
+    }
+    if (e.key === 'Escape' && state.panel) { openGroupPanel(false); return; }
     if (e.key === 'Escape' && state.expanded) { runTool(state.expanded, 'expand'); return; }
     const row = e.target.closest && e.target.closest('tr[data-mouse]');
     if (row && (e.key === 'Enter' || e.key === ' ')) {
@@ -1268,4 +1668,6 @@ if (typeof document !== 'undefined') {
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
 }
 
-if (typeof module === 'object' && module.exports) module.exports = { parseNote, derive, summarize, tumorVolume };
+if (typeof module === 'object' && module.exports) {
+  module.exports = { parseNote, derive, summarize, tumorVolume, cleanGrouping, applyGroups, distribute, groupLabel, UNGROUPED };
+}

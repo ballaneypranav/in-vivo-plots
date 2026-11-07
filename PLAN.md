@@ -44,11 +44,11 @@ Parsing rules:
 ## Derived values
 - **Weight % change:** from the mouse's first recorded weight.
 - **Tumor volume:** `longer × shorter² / 2` using `max`/`min` of the two sides (length and breadth are sometimes swapped, e.g. 89-3 on 2026-11-05). Only when both sides are present.
-- **Groups:** cage for now. Later an optional cage → group mapping (e.g. a `groups` property in the note's frontmatter), once the user says what the cages are.
+- **Groups:** by cage, or by the user's own groups. The groups panel assigns mice (not cages) to any number of named groups: tick mice (all / with a tumor in the latest session / tumor volume ≥ x / by hand), then move them into a group or spread them evenly (`distribute`: rank by latest tumor volume or body weight and send each run of k mice one to each of the k groups in random order, or shuffle). Stored on the device per note name (`in-vivo-plots:groups:<name>`) as `{ groups: [{ id, label }], assign: { mouseId: groupId } }`; not in the note, so the input format is unchanged. `applyGroups` turns the derived data into the same shape keyed by group (real cage kept in `realCage`), so every view works by group. Possible later: read the groups from the note so they sync across devices.
 - **Summary per group per date:** mean ± SEM and `n` over mice with a value.
 
 ## Views
-A toolbar above the charts scopes every view: cages shown, weight as % change or grams, tumor as volume or relative volume (÷ the mouse's first measured volume), linear or log tumor axis, error bars (SEM, SD, none), x axis as date or study day (days since the first session), a highlighted mouse, theme. Settings are saved on the device.
+A toolbar above the charts scopes every view: group by cage or by the user's groups (with a button that opens the groups panel), cages or groups shown, weight as % change or grams, tumor as volume or relative volume (÷ the mouse's first measured volume), linear or log tumor axis, error bars (SEM, SD, none), x axis as date or study day (days since the first session), a highlighted mouse, theme. Settings are saved on the device.
 
 1. Body weight per cage over time, mean ± error; reference lines at −15% and −20% in % mode.
 2. Individual body weights, one line per mouse; colored by cage, or by mouse with end labels when one cage is shown.

@@ -270,6 +270,67 @@ def no_storage(browser, url):
     ctx.close()
 
 
+def groups(browser, url, w, h):
+    """The groups panel on the demo: make groups, tick mice, spread them, rename, then the charts by group."""
+    print(f"groups panel {w}x{h}")
+    ctx = browser.new_context(viewport={"width": w, "height": h})
+    page = ctx.new_page()
+    errors = []
+    page.on("pageerror", lambda e: errors.append(str(e)))
+    page.on("dialog", lambda d: d.accept())
+    page.goto(url)
+    page.click("#demo")
+    page.wait_for_selector("#weight-group canvas")
+    page.click("[data-groups-open]")
+    check(page.locator("#group-panel").is_visible(), "panel opens")
+    for _ in range(3):
+        page.click('[data-gp="add"]')
+    check(page.locator("[data-label]").count() == 3, "three groups added")
+    page.click('[data-pick="tumor"]')
+    ticked = page.evaluate("[...state.selected]")
+    with_tumor = page.evaluate("state.base.latest.filter(r => r.volume > 0).map(r => r.id)")
+    check(sorted(ticked) == sorted(with_tumor) and len(ticked) > 0, f"'With a tumor' ticks {len(ticked)} mice")
+    page.click('[data-spread="volume"]')
+    assign = page.evaluate("state.grouping.assign")
+    sizes = sorted([list(assign.values()).count(g) for g in ("g1", "g2", "g3")])
+    check(set(assign) == set(ticked) and sizes[-1] - sizes[0] <= 1, f"spread puts every ticked mouse in a group, sizes {sizes}")
+    overflow = page.evaluate("(e => e.scrollWidth - e.clientWidth)(document.querySelector('#group-panel'))")
+    check(overflow <= 0, f"panel has no sideways scroll ({overflow}px)")
+    # A checkbox click ticks the mouse without highlighting it.
+    first = page.locator("[data-sel]").first
+    mid = first.get_attribute("data-sel")
+    was = first.is_checked()
+    first.click()
+    check(page.evaluate(f"state.selected.has({mid!r})") != was and page.evaluate("state.focus") is None, "checkbox toggles the tick only")
+    label = page.locator('[data-label="g1"]')
+    label.fill("Vehicle")
+    label.press("Enter")
+    check(page.evaluate("state.grouping.groups[0].label") == "Vehicle", "group renamed")
+    check(page.locator('[data-move="g1"] .lbl').inner_text() == "Vehicle", "rename shows on the move buttons")
+    page.locator('[data-label="g2"]').fill("Drug A")
+    page.keyboard.press("Escape")  # no Enter: the name must still reach the charts
+    check(page.locator("#group-panel").is_hidden(), "Escape closes the panel")
+    check(chart(page, "weight-group", "c.data.datasets[1].label") == "Drug A", "a name typed then Escape shows in the charts")
+    check(chart(page, "weight-group", "c.data.datasets[0].label") == "Vehicle", "charts are by group, with the label")
+    check("by group" in page.inner_text("#weight-group h2"), "titles say by group")
+    check(page.locator("[data-cage]").all_inner_texts()[0] == "Vehicle", "toolbar chips show the groups")
+    rows = page.evaluate("state.views.table.rows()")
+    check(rows[0][:3] == ["mouse", "cage", "group"], f"table CSV has cage and group {rows[0][:3]}")
+    page.click('[data-pref="by"][data-value="cage"]')
+    check(chart(page, "weight-group", "c.data.datasets[0].label") == "Cage 1", "back to by cage")
+    page.click('[data-pref="by"][data-value="group"]')
+    page.reload()
+    page.wait_for_selector("#weight-group canvas")
+    check(chart(page, "weight-group", "c.data.datasets[0].label") == "Vehicle", "groups remembered after reload")
+    check("group" in page.evaluate("allDataRows()[0]"), "data export has a group column")
+    page.click("[data-groups-open]")
+    page.click('[data-del="g3"]')
+    check(page.locator("[data-label]").count() == 2, "group deleted")
+    check(page.evaluate("document.documentElement.scrollWidth - document.documentElement.clientWidth") <= 0, "no sideways page scroll")
+    check(not errors, f"no page errors {errors}")
+    ctx.close()
+
+
 def main(note):
     httpd, url = serve()
     with sync_playwright() as p:
@@ -283,6 +344,8 @@ def main(note):
             desktop(browser, url, 1920, 1080, 6, note)
             desktop(browser, url, 1536, 864, 6, note)
         no_storage(browser, url)
+        groups(browser, url, 1440, 900)
+        groups(browser, url, 375, 800)
         browser.close()
     httpd.shutdown()
     print("FAILED: %d" % len(failures) if failures else "all checks passed")
