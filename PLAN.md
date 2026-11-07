@@ -33,7 +33,7 @@ A mouse is its **Mouse ID** (the aTune ID). Cage and tail mark are attributes of
 | 1234567 | F | Vehicle | euthanized | 2026-11-12 | weight loss | |
 
 Parsing rules (`parseWorkbook`, given `{ sheetName: rows }` from SheetJS so it runs in Node):
-- The Measurements sheet is the one named `Measurements` whose header has `Date` and `Mouse ID`, else the first sheet with those; the Mice sheet likewise by `Mouse ID` and `Status`. Other sheets are ignored. The header is the first non-empty row; columns are matched by name (case and punctuation ignored, any order).
+- The Measurements sheet is the one named `Measurements` whose header has `Date` and `Mouse ID`, else the first sheet with those; the Mice sheet likewise by `Mouse ID` and `Status`. Other sheets are ignored. The header is the first non-empty row; columns are matched by name (case and punctuation ignored, any order). Aliases: `Animal ID` = `Mouse ID`, `Cage ID` (or `Cage No.`) = `Cage`. Unknown columns, such as `Cage ID` and `Tail mark` on the Mice sheet, are ignored.
 - `Date` / `End date`: an Excel date (serial number) or `YYYY-MM-DD` text. Empty measurement cells = not measured (`null`).
 - `Status` is `alive` (or empty), `euthanized`, `found dead` or `removed`; anything but alive, or an end date, means the mouse has ended. Without an end date, its last measurement is used. Rows after the end date are ignored.
 - Warnings (shown with sheet and row): bad dates or numbers, rows without a Mouse ID, a mouse listed twice on one date, two mice in the same cage and tail mark on one date, one tumor side only, measured mice missing from the Mice sheet, rows after the end date.

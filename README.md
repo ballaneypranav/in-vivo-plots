@@ -27,7 +27,7 @@ Rows the app can't read are listed under the header, with the sheet and row (wor
 - **Measurements**: `Date`, `Cage`, `Tail mark`, `Mouse ID`, `Weight (g)`, `Tumor Length`, `Tumor Breadth`, `Notes`, one row per mouse per session. Cage and tail mark are where the mouse was that day.
 - **Mice**: `Mouse ID`, `Sex`, `Group`, `Status` (`alive`, `euthanized`, `found dead`, `removed`), `End date`, `End reason`, `Notes`, one row per mouse.
 
-Columns are matched by name, in any order. An empty cell means "not measured". See `PLAN.md` → *Input format*; the same contract is documented in the Obsidian vault (`02 Notes/In-vivo Plots.md`). The older note format (one `## YYYY-MM-DD` heading and table per session) is still read.
+Columns are matched by name, in any order. `Animal ID` is read as `Mouse ID` and `Cage ID` as `Cage`; other columns (such as `Cage ID` or `Tail mark` on the Mice sheet) are ignored. An empty cell means "not measured". See `PLAN.md` → *Input format*; the same contract is documented in the Obsidian vault (`02 Notes/In-vivo Plots.md`). The older note format (one `## YYYY-MM-DD` heading and table per session) is still read.
 
 ## Develop
 

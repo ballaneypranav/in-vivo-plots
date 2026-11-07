@@ -145,12 +145,13 @@ function parseTable(block, start, session, warn) {
 
 const norm = s => String(s ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
 const MEASURE_COLUMNS = {
-  date: 'date', cage: 'cage', cageno: 'cage', tailmark: 'mark', tail: 'mark', mouseno: 'mark', mouseid: 'id',
+  date: 'date', cage: 'cage', cageno: 'cage', cageid: 'cage', tailmark: 'mark', tail: 'mark', mouseno: 'mark',
+  mouseid: 'id', animalid: 'id',
   weightg: 'weight', bodyweightg: 'weight', bodyweight: 'weight', weight: 'weight',
   tumorlength: 'length', tumorbreadth: 'breadth', notes: 'note', note: 'note',
 };
 const MICE_COLUMNS = {
-  mouseid: 'id', sex: 'sex', group: 'group', status: 'status', enddate: 'endDate', endreason: 'endReason', notes: 'notes', note: 'notes',
+  mouseid: 'id', animalid: 'id', sex: 'sex', group: 'group', status: 'status', enddate: 'endDate', endreason: 'endReason', notes: 'notes', note: 'notes',
 };
 const STATUSES = ['alive', 'euthanized', 'found dead', 'removed'];
 const EXCEL_EPOCH = Date.UTC(1899, 11, 30);
@@ -1898,7 +1899,7 @@ function show(parsed, name, savedAt) {
     document.getElementById('toolbar').hidden = true;
     renderViews();
     setStatus(/\.xlsx$/i.test(name)
-      ? `<strong>${escapeHtml(name)}</strong> has no measurements. The Measurements sheet needs a header row (Date, Cage, Tail mark, Mouse ID, Weight (g), Tumor Length, Tumor Breadth) and one row per mouse per session.`
+      ? `<strong>${escapeHtml(name)}</strong> has no measurements. The Measurements sheet needs a header row (Date, Cage or Cage ID, Tail mark, Mouse ID or Animal ID, Weight (g), Tumor Length, Tumor Breadth) and one row per mouse per session.`
       : `<strong>${escapeHtml(name)}</strong> has no measurement sessions. Each session starts with a heading like <code>## 2026-11-05</code> followed by the measurement table.`);
     return false;
   }

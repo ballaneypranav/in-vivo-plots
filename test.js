@@ -247,6 +247,25 @@ test('workbook: rows, Excel dates, text dates, moves and the Mice sheet', () => 
   assert.equal(g.mice.find(m => m.id === 'A1').realCage, '9');
 });
 
+test('workbook: Animal ID and Cage ID headers, numeric IDs, extra Mice columns', () => {
+  const sheets = {
+    Measurements: [
+      ['Animal ID', 'Cage ID', 'Tail mark', 'Date', 'Weight (g)', 'Tumor Length', 'Tumor Breadth', 'Notes'],
+      [101, 3001, 1, serial('2026-03-01'), 20, null, null, null],
+      [102, 3001, 2, serial('2026-03-01'), 21, 3, 2, null],
+    ],
+    Mice: [
+      ['Animal ID', 'Cage ID', 'Tail mark', 'Sex', 'Group', 'Status', 'End date', 'End reason', 'Notes'],
+      [101, 3001, 1, 'F', 'Drug', 'alive'],
+      [102, 3001, 2, 'F', 'Vehicle', 'alive'],
+    ],
+  };
+  const p = parseWorkbook(sheets);
+  assert.deepEqual(p.warnings, []);
+  assert.deepEqual(p.sessions[0].rows[1], { id: '102', cage: '3001', mark: '2', weight: 21, length: 3, breadth: 2 });
+  assert.deepEqual(p.mice.map(m => [m.id, m.group]), [['101', 'Drug'], ['102', 'Vehicle']]);
+});
+
 test('workbook: problems are reported with sheet and row', () => {
   const sheets = {
     Data: [
