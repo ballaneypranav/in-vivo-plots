@@ -203,6 +203,10 @@ main { display: grid; gap: 16px; padding-top: 12px; }
 .flag.warning { border-color: var(--warning); background: var(--warning-wash); }
 .flag.critical { border-color: var(--critical); background: var(--critical-wash); }
 .flag.missing { color: var(--ink-2); }
+.flag.ended { color: var(--ink-2); border-style: dashed; }
+.kpi.ended .kpi-value { color: var(--ink-2); }
+.end-mark { color: var(--muted); font-weight: 600; cursor: help; }
+td.where { color: var(--ink-2); text-align: left; }
 
 .table-wrap { overflow: auto; -webkit-overflow-scrolling: touch; }
 table { width: 100%; border-collapse: collapse; font-size: 0.9rem; font-variant-numeric: tabular-nums; }
@@ -219,7 +223,7 @@ tbody tr[data-mouse] { cursor: pointer; }
 tbody tr[data-mouse]:hover th, tbody tr[data-mouse]:hover td { background-color: var(--accent-wash); }
 tr.warning th { box-shadow: inset 4px 0 0 var(--warning); padding-left: 10px; }
 tr.critical th { box-shadow: inset 4px 0 0 var(--critical); padding-left: 10px; }
-tr.missing td:not(:last-child) { color: var(--muted); }
+tr.missing td:not(:last-child), tr.ended td:not(:last-child) { color: var(--muted); }
 tr.focused th, tr.focused td { font-weight: 700; }
 tr.focused th { background: var(--accent-wash); box-shadow: inset 4px 0 0 var(--accent); padding-left: 10px; }
 
@@ -229,6 +233,9 @@ tr.focused th { background: var(--accent-wash); box-shadow: inset 4px 0 0 var(--
 .heat td.strong { font-weight: 700; }
 .heat td:last-child { text-align: center; }
 .heat tr.cage-start th, .heat tr.cage-start td { border-top: 2px solid var(--axis); }
+/* A move: a bar on the cell's left edge (the tooltip says from where). After the end: hatched. */
+.heat td.moved { box-shadow: inset 3px 0 0 var(--ink-2); }
+.heat td.after-end { background: repeating-linear-gradient(135deg, transparent 0 4px, var(--grid) 4px 5px); }
 .heat tbody tr[data-mouse]:hover td { outline: 1px solid var(--axis); outline-offset: -1px; }
 
 footer { color: var(--muted); font-size: 0.8rem; text-align: center; padding: 24px 0 0; }
@@ -334,9 +341,11 @@ body.panel-open::before { content: ""; position: fixed; inset: 0; background: va
   #views {
     --row-h: max(300px, calc((100vh - var(--top, 190px) - 14px - 16px) / 2));
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    grid-template-rows: repeat(3, var(--row-h)) auto;
-    grid-template-areas: "wg wi" "tg ti" "wl tl" "tab grid";
+    grid-template-rows: repeat(3, var(--row-h)) auto auto;
+    grid-template-areas: "wg wi" "tg ti" "wl tl" "surv tab" "grid grid";
   }
+  #survival { grid-area: surv; }
+  #survival .chart { min-height: 300px; }
   .chart-card { display: flex; flex-direction: column; }
   .chart-card .chart { flex: 1 1 0; min-height: 0; height: auto; }
   #weight-group { grid-area: wg; } #weight-mice { grid-area: wi; } #weight-latest { grid-area: wl; }
@@ -358,7 +367,7 @@ body.panel-open::before { content: ""; position: fixed; inset: 0; background: va
   #views {
     grid-template-columns: repeat(6, minmax(0, 1fr));
     grid-template-rows: repeat(2, var(--row-h)) auto;
-    grid-template-areas: "wg wg wi wi wl wl" "tg tg ti ti tl tl" "tab tab tab grid grid grid";
+    grid-template-areas: "wg wg wi wi wl wl" "tg tg ti ti tl tl" "surv surv tab tab grid grid";
   }
 }
 

@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>In-vivo Plots</title>
-  <meta name="description" content="Plots mouse body weight and tumor volume from an experiment note. The note is read on your device and never uploaded.">
+  <meta name="description" content="Plots mouse body weight, tumor volume and survival from a study workbook or experiment note. The file is read on your device and never uploaded.">
   <meta name="theme-color" content="#f9f9f7" media="(prefers-color-scheme: light)">
   <meta name="theme-color" content="#0d0d0d" media="(prefers-color-scheme: dark)">
   <link rel="manifest" href="manifest.webmanifest">
@@ -17,10 +17,10 @@
     <div class="masthead">
       <h1>In-vivo Plots</h1>
       <div class="actions">
-        <!-- No `accept` attribute: iOS can grey out .md files. The text is validated after reading. -->
-        <label class="button primary">Choose note <input type="file" id="note-file"></label>
+        <!-- No `accept` attribute: iOS can grey out .md files. The file is validated after reading. -->
+        <label class="button primary" title="The study workbook (.xlsx) or an experiment note (.md)">Choose file <input type="file" id="note-file"></label>
         <button type="button" class="button" id="demo">Load demo</button>
-        <button type="button" class="button quiet" id="forget" hidden>Forget note</button>
+        <button type="button" class="button quiet" id="forget" hidden>Forget file</button>
       </div>
       <p id="status" role="status"></p>
       <div id="kpis" class="kpis" hidden></div>
@@ -30,7 +30,7 @@
   </header>
   <main id="views"></main>
   <div id="group-panel" class="group-panel" role="dialog" aria-modal="true" aria-labelledby="group-panel-title" hidden></div>
-  <footer>Your note is read in this browser and never uploaded.</footer>
+  <footer>Your file is read in this browser and never uploaded.</footer>
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
   <script src="vendor/chart.umd.min.js"></script>
   <script src="app.js"></script>

@@ -1,18 +1,19 @@
 // Offline support: cache the app shell, serve from cache, refresh the cache in the background.
 // Paths are relative so the app works under /in-vivo-plots/ on GitHub Pages.
 // Bump CACHE when the shell file list changes.
-const CACHE = 'in-vivo-plots-v2';
+const CACHE = 'in-vivo-plots-v3';
 const SHELL = [
   './',
   'index.html',
   'style.css',
   'app.js',
   'vendor/chart.umd.min.js',
+  'vendor/xlsx.mini.min.js',
   'manifest.webmanifest',
   'icons/icon-192.png',
   'icons/icon-512.png',
   'icons/icon-maskable-512.png',
-  'demo/synthetic-demo.md',
+  'demo/synthetic-demo.xlsx',
 ];
 
 self.addEventListener('install', event => {

@@ -137,6 +137,168 @@ function parseTable(block, start, session, warn) {
   }
 }
 
+/* --------------------------------------------------------- parse a workbook */
+// The study workbook (.xlsx) has a Measurements sheet, one row per mouse per session as written on the
+// day's sheet (cage, tail mark) plus the mouse's ID, and an optional Mice sheet, one row per mouse
+// (group, status, end date). Sheets arrive as arrays of rows of raw cell values (SheetJS sheet_to_json
+// with header: 1), so this part runs in Node without SheetJS.
+
+const norm = s => String(s ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
+const MEASURE_COLUMNS = {
+  date: 'date', cage: 'cage', cageno: 'cage', tailmark: 'mark', tail: 'mark', mouseno: 'mark', mouseid: 'id',
+  weightg: 'weight', bodyweightg: 'weight', bodyweight: 'weight', weight: 'weight',
+  tumorlength: 'length', tumorbreadth: 'breadth', notes: 'note', note: 'note',
+};
+const MICE_COLUMNS = {
+  mouseid: 'id', sex: 'sex', group: 'group', status: 'status', enddate: 'endDate', endreason: 'endReason', notes: 'notes', note: 'notes',
+};
+const STATUSES = ['alive', 'euthanized', 'found dead', 'removed'];
+const EXCEL_EPOCH = Date.UTC(1899, 11, 30);
+
+const cellText = v => (v === null || v === undefined ? '' : String(v).trim());
+
+/** A date cell (Excel serial number, Date or "YYYY-MM-DD" text) as ISO, or null. */
+function cellDate(v) {
+  if (typeof v === 'number' && Number.isFinite(v)) return new Date(EXCEL_EPOCH + Math.round(v) * DAY).toISOString().slice(0, 10);
+  if (v instanceof Date && !Number.isNaN(v.getTime())) {
+    return `${v.getFullYear()}-${String(v.getMonth() + 1).padStart(2, '0')}-${String(v.getDate()).padStart(2, '0')}`;
+  }
+  const m = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(cellText(v));
+  if (!m) return null;
+  const iso = `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`;
+  return isValidDate(iso) ? iso : null;
+}
+
+/** The header row (first non-empty row) of a sheet, mapped to fields. */
+function readSheet(rows, map) {
+  const start = rows.findIndex(r => Array.isArray(r) && r.some(c => cellText(c) !== ''));
+  if (start < 0) return null;
+  const idx = {};
+  rows[start].forEach((name, k) => {
+    const f = map[norm(name)];
+    if (f && idx[f] === undefined) idx[f] = k;
+  });
+  return { idx, start, rows };
+}
+
+/** The sheet named like `nameRe` whose header has the `required` fields, else the first sheet that has them. */
+function pickSheet(sheets, nameRe, map, required) {
+  const names = Object.keys(sheets);
+  const fits = n => {
+    const s = readSheet(sheets[n] || [], map);
+    return s && required.every(f => s.idx[f] !== undefined) ? { name: n, ...s } : null;
+  };
+  for (const n of names.filter(x => nameRe.test(x.trim()))) { const s = fits(n); if (s) return s; }
+  for (const n of names) { const s = fits(n); if (s) return s; }
+  return null;
+}
+
+/**
+ * Parse a study workbook given as { sheetName: rows }.
+ * Returns { sessions: [{ date, rows: [{ id, cage, mark, weight, length, breadth, note? }] }],
+ *           mice: [{ id, sex, group, status, endDate, endReason, notes }], warnings: [{ where, message }] }.
+ */
+function parseWorkbook(sheets) {
+  const warnings = [];
+  const warn = (where, message) => warnings.push({ where, message });
+  const meas = pickSheet(sheets, /^measurements?$/i, MEASURE_COLUMNS, ['date', 'id']);
+  if (!meas) {
+    warn('Workbook', 'No Measurements sheet: it needs a header row with at least Date and Mouse ID columns.');
+    return { sessions: [], mice: [], warnings };
+  }
+
+  const roster = [];
+  const rosterById = new Map();
+  const miceSheet = pickSheet(sheets, /^mice$/i, MICE_COLUMNS, ['id', 'status']);
+  if (miceSheet && miceSheet.name !== meas.name) {
+    const { idx, start, rows, name } = miceSheet;
+    for (let r = start + 1; r < rows.length; r++) {
+      const row = rows[r] || [];
+      if (!row.some(c => cellText(c) !== '')) continue;
+      const get = f => (idx[f] === undefined ? '' : row[idx[f]]);
+      const where = `${name} row ${r + 1}`;
+      const id = cellText(get('id'));
+      if (!id) { warn(where, 'No Mouse ID; row skipped.'); continue; }
+      if (rosterById.has(id)) { warn(where, `Mouse ${id} is listed twice; the later row is ignored.`); continue; }
+      const status = cellText(get('status')).toLowerCase();
+      if (status && !STATUSES.includes(status)) warn(where, `Mouse ${id}: status "${status}" is not one of ${STATUSES.join(', ')}; treated as ended.`);
+      let endDate = null;
+      if (cellText(get('endDate')) !== '') {
+        endDate = cellDate(get('endDate'));
+        if (!endDate) warn(where, `Mouse ${id}: end date "${cellText(get('endDate'))}" is not a date (use YYYY-MM-DD).`);
+      }
+      const m = {
+        id, sex: cellText(get('sex')), group: cellText(get('group')),
+        status: status || (endDate ? 'ended' : 'alive'), endDate, endReason: cellText(get('endReason')), notes: cellText(get('notes')),
+      };
+      if (m.status !== 'alive' && !endDate) warn(where, `Mouse ${id} is ${m.status} but has no end date; its last measurement is used.`);
+      roster.push(m);
+      rosterById.set(id, m);
+    }
+  }
+
+  const byDate = new Map();
+  const unknown = new Set();
+  const { idx, start, rows, name } = meas;
+  for (let r = start + 1; r < rows.length; r++) {
+    const row = rows[r] || [];
+    if (!row.some(c => cellText(c) !== '')) continue;
+    const get = f => (idx[f] === undefined ? '' : row[idx[f]]);
+    const where = `${name} row ${r + 1}`;
+    const date = cellDate(get('date'));
+    if (!date) { warn(where, `Date "${cellText(get('date'))}" is not a date (use YYYY-MM-DD); row skipped.`); continue; }
+    const id = cellText(get('id'));
+    const cage = cellText(get('cage'));
+    const mark = cellText(get('mark'));
+    if (!id) { warn(where, `${date}: no Mouse ID${cage ? ` for cage ${cage}${mark ? `, tail ${mark}` : ''}` : ''}; row skipped.`); continue; }
+    if (!byDate.has(date)) byDate.set(date, { date, rows: [], ids: new Set(), spots: new Map() });
+    const s = byDate.get(date);
+    if (s.ids.has(id)) { warn(where, `${date}: mouse ${id} is listed twice; the later row is ignored.`); continue; }
+    const info = rosterById.get(id);
+    if (info && info.endDate && date > info.endDate) { warn(where, `${date}: mouse ${id} ended on ${info.endDate}; this later row is ignored.`); continue; }
+    s.ids.add(id);
+    if (cage && mark) {
+      const spot = `${cage}/${mark}`;
+      if (s.spots.has(spot)) warn(where, `${date}: mice ${s.spots.get(spot)} and ${id} are both in cage ${cage}, tail ${mark}.`);
+      else s.spots.set(spot, id);
+    }
+    const out = { id, cage, mark };
+    for (const f of ['weight', 'length', 'breadth']) {
+      const v = get(f);
+      const text = cellText(v);
+      if (typeof v === 'number' && Number.isFinite(v)) out[f] = v;
+      else if (text === '') out[f] = null;
+      else if (NUMBER.test(text)) out[f] = Number(text);
+      else {
+        out[f] = null;
+        warn(where, `${date}: mouse ${id}, ${f} "${text}" is not a number; treated as not measured.`);
+      }
+    }
+    if ((out.length === null) !== (out.breadth === null)) warn(where, `${date}: mouse ${id} has only one tumor side; no volume.`);
+    const note = cellText(get('note'));
+    if (note) out.note = note;
+    s.rows.push(out);
+    if (roster.length && !info) unknown.add(id);
+  }
+  if (unknown.size) warn(miceSheet.name, `Measured but not listed on this sheet: ${[...unknown].sort(byNatural).join(', ')}.`);
+
+  const sessions = [...byDate.values()].sort((a, b) => a.date.localeCompare(b.date)).map(s => ({ date: s.date, rows: s.rows }));
+  return { sessions, mice: roster, warnings };
+}
+
+/** Workbook bytes -> { sheetName: rows } with SheetJS (`lib` is the XLSX global). Row k is spreadsheet row k + 1. */
+function readWorkbookSheets(lib, data) {
+  const wb = lib.read(data, { type: 'array', cellDates: false });
+  const out = {};
+  for (const n of wb.SheetNames) {
+    const ws = wb.Sheets[n];
+    const rows = lib.utils.sheet_to_json(ws, { header: 1, raw: true, defval: null, blankrows: true });
+    const r0 = ws['!ref'] ? lib.utils.decode_range(ws['!ref']).s.r : 0;
+    out[n] = [...Array.from({ length: r0 }, () => []), ...rows];
+  }
+  return out;
+}
+
 /* ----------------------------------------------------------------- derive */
 
 const byNatural = (a, b) => a.localeCompare(b, undefined, { numeric: true });
@@ -168,39 +330,79 @@ const LOSS_ALERT = -20;
  * Per-mouse series, weight % change from the first recorded weight, tumor volume and relative tumor
  * volume (÷ the mouse's first measured volume), per-cage mean ± SEM, and latest-session values with flags.
  * days[k] is the study day of session k (days since the first session).
+ *
+ * A mouse is its Mouse ID (workbook) or `cage-mouse` (note). Its `cage` and `mouse` (tail mark) are where it
+ * is now, from its latest row, so the by-cage views put each mouse's whole history under its current cage.
+ * Each point keeps the cage and tail mark of that day, and `moved` (the previous place) when they changed.
+ * `parsed.mice` (the workbook's Mice sheet) adds group, status and end date; points after the end are empty.
  */
 function derive(parsed) {
   const dates = parsed.sessions.map(s => s.date);
   const days = dates.map(date => Math.round((ts(date) - ts(dates[0])) / DAY));
+  const dayOf = date => Math.round((ts(date) - ts(dates[0])) / DAY);
   const latestDate = dates[dates.length - 1] ?? null;
+  const roster = new Map((parsed.mice || []).map(m => [m.id, m]));
   const miceById = new Map();
 
   for (const s of parsed.sessions) {
     for (const r of s.rows) {
-      const id = `${r.cage}-${r.mouse}`;
-      if (!miceById.has(id)) miceById.set(id, { id, cage: r.cage, mouse: r.mouse, byDate: {} });
+      const id = r.id ?? `${r.cage}-${r.mouse}`;
+      if (!miceById.has(id)) miceById.set(id, { id, byDate: {} });
       miceById.get(id).byDate[s.date] = r;
     }
   }
 
-  const mice = [...miceById.values()].sort((a, b) => byNatural(a.cage, b.cage) || byNatural(a.mouse, b.mouse));
+  const place = r => ({ cage: cellText(r.cage), mark: cellText(r.mark ?? r.mouse) });
+  const hasData = r => r && (r.weight !== null || r.length !== null || r.breadth !== null);
+  for (const m of miceById.values()) {
+    const rowDates = dates.filter(d => m.byDate[d]);
+    const now = place(m.byDate[rowDates[rowDates.length - 1]]);
+    m.cage = now.cage;
+    m.mouse = now.mark;
+    const info = roster.get(m.id) || {};
+    m.group = info.group || '';
+    m.sex = info.sex || '';
+    m.status = info.status || 'alive';
+    m.endReason = info.endReason || '';
+    m.ended = m.status !== 'alive' || Boolean(info.endDate);
+    const seen = dates.filter(d => hasData(m.byDate[d]));
+    m.endDate = m.ended ? (info.endDate || seen[seen.length - 1] || rowDates[rowDates.length - 1]) : null;
+    m.endDay = m.endDate ? dayOf(m.endDate) : null;
+  }
+
+  const mice = [...miceById.values()].sort((a, b) => byNatural(a.cage, b.cage) || byNatural(a.mouse, b.mouse) || byNatural(a.id, b.id));
   for (const m of mice) {
-    const firstWeighed = dates.find(d => m.byDate[d] && m.byDate[d].weight !== null);
-    m.baseline = firstWeighed ? m.byDate[firstWeighed].weight : null;
+    const rowAt = date => (m.endDate && date > m.endDate ? null : m.byDate[date] || null);
+    const firstWeighed = dates.find(d => rowAt(d) && rowAt(d).weight !== null);
+    m.baseline = firstWeighed ? rowAt(firstWeighed).weight : null;
+    let prev = null;
     m.points = dates.map((date, k) => {
-      const r = m.byDate[date];
+      const r = rowAt(date);
       const weight = r ? r.weight : null;
       const length = r ? r.length : null;
       const breadth = r ? r.breadth : null;
       const pct = weight !== null && m.baseline ? ((weight - m.baseline) / m.baseline) * 100 : null;
-      return { date, day: days[k], weight, pct, length, breadth, volume: tumorVolume(length, breadth) };
+      const p = { date, day: days[k], weight, pct, length, breadth, volume: tumorVolume(length, breadth), cage: null, mark: null };
+      if (r) {
+        const here = place(r);
+        p.cage = here.cage;
+        p.mark = here.mark;
+        if (prev && here.cage && prev.cage && (here.cage !== prev.cage || here.mark !== prev.mark)) p.moved = prev;
+        if (here.cage) prev = here;
+        if (r.note) p.note = r.note;
+      }
+      return p;
     });
     const firstTumor = m.points.find(p => p.volume !== null);
     m.firstVolume = firstTumor ? firstTumor.volume : null;
     for (const p of m.points) p.rtv = p.volume !== null && m.firstVolume ? p.volume / m.firstVolume : null;
-    const hasData = p => p.weight !== null || p.length !== null || p.breadth !== null;
-    const seen = m.points.filter(hasData);
+    const seen = m.points.filter(p => p.weight !== null || p.length !== null || p.breadth !== null);
     m.lastSeen = seen.length ? seen[seen.length - 1].date : null;
+    if (m.ended) {
+      // The end marker goes on the last point drawn on or before the end date.
+      const last = [...m.points].reverse().find(p => p.date <= m.endDate && (p.weight !== null || p.volume !== null));
+      if (last) last.end = true;
+    }
     delete m.byDate;
   }
 
@@ -214,16 +416,57 @@ function derive(parsed) {
       if (p.pct <= LOSS_ALERT) flags.push('loss-alert');
       else if (p.pct <= LOSS_WARNING) flags.push('loss-warning');
     }
-    const missing = m.lastSeen !== null && m.lastSeen !== latestDate;
-    if (missing) flags.push('missing');
+    if (m.ended) flags.push('ended');
+    else if (m.lastSeen !== null && m.lastSeen !== latestDate) flags.push('missing');
     return {
       id: m.id, cage: m.cage, mouse: m.mouse,
       weight: p.weight ?? null, pct: p.pct ?? null, volume: p.volume ?? null, rtv: p.rtv ?? null,
       lastSeen: m.lastSeen, flags,
+      group: m.group, status: m.status, endDate: m.endDate, endDay: m.endDay, endReason: m.endReason,
     };
   });
 
-  return { unit: 'cage', dates, days, latestDate, mice, cages, groups, latest };
+  // Workbook groups in the order they first appear on the Mice sheet.
+  const groupNames = [...new Set([...(parsed.mice || []).map(m => m.group), ...mice.map(m => m.group)].filter(Boolean))];
+  return { unit: 'cage', dates, days, latestDate, mice, cages, groups, latest, groupNames, hasRoster: roster.size > 0 };
+}
+
+/** The workbook's groups (Mice sheet), as a grouping for applyGroups, in the sheet's order. */
+function studyGrouping(d) {
+  const used = new Set(d.mice.map(m => m.group).filter(Boolean));
+  const names = (d.groupNames || [...used]).filter(n => used.has(n));
+  return {
+    groups: names.map(n => ({ id: n, label: n })),
+    assign: Object.fromEntries(d.mice.filter(m => m.group).map(m => [m.id, m.group])),
+  };
+}
+
+// Found dead, or euthanized at a humane endpoint, is an event. Euthanized at the end of the study,
+// removed from the study, and alive at the last session are censored.
+const isEvent = m => m.ended && m.status !== 'removed' && !/end of study/i.test(m.endReason || '');
+
+/**
+ * Kaplan–Meier survival of the mice whose `cage` is each key. Returns [{ key, n, points: [{ date, s,
+ * atRisk, events }] }], with a point at the first session, at each end date and at the last session.
+ */
+function survival(mice, keys, dates) {
+  const first = dates[0];
+  const lastSession = dates[dates.length - 1];
+  return keys.map(key => {
+    const members = mice.filter(m => m.cage === key);
+    const ends = [...new Set(members.filter(m => m.ended).map(m => m.endDate))].sort();
+    let s = 1;
+    const points = [{ date: first, s, atRisk: members.length, events: 0 }];
+    for (const date of ends) {
+      const atRisk = members.filter(m => !m.ended || m.endDate >= date).length;
+      const events = members.filter(m => m.endDate === date && isEvent(m)).length;
+      if (events && atRisk) s *= 1 - events / atRisk;
+      points.push({ date, s, atRisk, events });
+    }
+    const last = ends.length && ends[ends.length - 1] > lastSession ? ends[ends.length - 1] : lastSession;
+    if (points[points.length - 1].date !== last) points.push({ date: last, s, atRisk: members.filter(m => !m.ended).length, events: 0 });
+    return { key, n: members.length, points };
+  });
 }
 
 /** Per-group mean ± SEM of every metric at every session. `keys` are the values of m.cage, in display order. */
@@ -342,9 +585,11 @@ const PREF_VALUES = {
   theme: ['auto', 'light', 'dark'],
   order: ['value', 'mouse'],     // per-mouse bar charts
   heat: ['pct', 'weight', 'volume', 'rtv'],
-  by: ['cage', 'group'],         // aggregate and color by cage or by the user's groups
+  // Aggregate and color by the workbook's groups, the current cage, or the user's own groups (this device).
+  // Falls back when the chosen one isn't there (see effectiveBy).
+  by: ['group', 'cage', 'mine'],
 };
-const SORT_KEYS = ['id', 'weight', 'pct', 'volume', 'rtv', 'flags'];
+const SORT_KEYS = ['id', 'where', 'weight', 'pct', 'volume', 'rtv', 'flags'];
 
 function loadPrefs() {
   let saved = {};
@@ -368,6 +613,7 @@ const state = {
   panel: false,     // groups panel open
   panelSort: 'mouse',
   minVolume: '',    // "Tumor vol. ≥" box in the groups panel
+  parsed: null,     // parse output, for the workbook's Mice order
 };
 
 const savePrefs = () => store.set(STORE_PREFS, JSON.stringify(state.prefs));
@@ -418,6 +664,14 @@ const cageText = (d, c) => (d.unit === 'group' ? d.labels[c] : c); // for chips 
 // Mouse identity columns for CSV: in group mode the real cage and the group label.
 const idHead = d => (d.unit === 'group' ? ['mouse', 'cage', 'group'] : ['mouse', 'cage']);
 const idVals = (d, m) => (d.unit === 'group' ? [m.id, m.realCage, d.labels[m.cage]] : [m.id, m.cage]);
+// Where a mouse is now (latest row), or was on a point's date.
+const realCage = m => m.realCage ?? m.cage;
+const placeText = (cage, mark) => (cage ? `${cage}${mark ? ` · t${mark}` : ''}` : '—');
+const placeLong = (cage, mark) => (cage ? `cage ${cage}${mark ? `, tail ${mark}` : ''}` : '');
+const STATUS_TEXT = { euthanized: 'Euthanized', 'found dead': 'Found dead', removed: 'Removed', ended: 'Ended' };
+const statusText = s => STATUS_TEXT[s] || (s ? s[0].toUpperCase() + s.slice(1) : 'Ended');
+/** "Euthanized Nov 12 (day 15) · weight loss" */
+const endText = m => `${statusText(m.status)} ${fmtDate(ts(m.endDate))} (day ${m.endDay})${m.endReason ? ` · ${m.endReason}` : ''}`;
 const xv = (d, k) => (state.prefs.x === 'day' ? d.days[k] : ts(d.dates[k]));
 const errName = () => ({ sem: 'SEM', sd: 'SD', none: '' }[state.prefs.error]);
 
@@ -508,15 +762,21 @@ const endLabels = {
 
 /* --------------------------------------------------------- chart options */
 
-function xScale(t, d) {
+// x of any date (an end date can fall between sessions).
+const xOfDate = (d, date) => (state.prefs.x === 'day' ? Math.round((ts(date) - ts(d.dates[0])) / DAY) : ts(date));
+
+function xScale(t, d, extraDates = []) {
   const day = state.prefs.x === 'day';
   const xs = d.dates.map((_, k) => xv(d, k));
+  const all = [...xs, ...extraDates.map(date => xOfDate(d, date))];
+  const lo = Math.min(...all);
+  const hi = Math.max(...all);
   const unit = day ? 1 : DAY;
-  const pad = Math.max(0.4 * unit, (xs[xs.length - 1] - xs[0]) * 0.03);
+  const pad = Math.max(0.4 * unit, (hi - lo) * 0.03);
   return {
     type: 'linear',
-    min: xs[0] - pad,
-    max: xs[xs.length - 1] + pad,
+    min: lo - pad,
+    max: hi + pad,
     afterBuildTicks: axis => { axis.ticks = xs.map(value => ({ value })); },
     ticks: { color: t.muted, maxRotation: 0, autoSkip: true, callback: v => (day ? `Day ${v}` : fmtDate(v)) },
     grid: { color: t.grid },
@@ -697,26 +957,36 @@ function renderGroupChart(root, t, d, id, metric, title) {
 }
 
 // Dim every line but the hovered (or highlighted) one.
+// The end marker (✕) is drawn with the point border, so it takes the line color instead of the ring.
 function emphasize(datasets, active) {
   datasets.forEach((ds, i) => {
     const on = active === null || i === active;
-    ds.borderColor = ds.backgroundColor = on ? ds.$color : dim(ds.$color);
-    ds.pointBorderColor = on ? ds.$ring : 'transparent';
+    const color = on ? ds.$color : dim(ds.$color);
+    const ring = on ? ds.$ring : 'transparent';
+    ds.borderColor = ds.backgroundColor = color;
+    ds.pointBorderColor = c => (c.raw && c.raw.end ? color : ring);
     ds.borderWidth = active !== null && i === active ? ds.$width + 1.5 : ds.$width;
   });
 }
+
+// Point markers on the individual lines: ◆ where the mouse changed cage or tail mark, ✕ at its end.
+const markerStyle = c => (c.raw && c.raw.end ? 'crossRot' : c.raw && c.raw.moved ? 'rectRot' : 'circle');
+const markerRadius = base => c => (c.raw && c.raw.end ? base + 3.5 : c.raw && c.raw.moved ? base + 1.5 : base);
+const markerBorder = c => (c.raw && c.raw.end ? 2.5 : 1);
 
 // One line per mouse. All cages: color = cage. One cage: color = mouse, by its fixed position in the cage,
 // and each line is labelled at its end.
 function renderMiceChart(root, t, d, id, metric, title) {
   const M = METRICS[metric];
-  const sec = card(id, title, 'One line per mouse.', CHART_TOOLS, { hint: 'Hover to pick out a mouse; click to highlight it everywhere.' });
-  root.appendChild(sec);
   const shown = shownCages(d);
   const mice = d.mice.filter(m => shown.includes(m.cage));
+  const keys = [mice.some(m => m.points.some(p => p.moved)) && '◆ moved cage', mice.some(m => m.ended) && '✕ ended'].filter(Boolean);
+  const sub = `One line per mouse.${keys.length ? ` ${keys.join(', ')}.` : ''}`;
+  const sec = card(id, title, sub, CHART_TOOLS, { hint: 'Hover to pick out a mouse; click to highlight it everywhere.' });
+  root.appendChild(sec);
   state.views[id].rows = () => [
-    [...idHead(d), 'date', 'study_day', metric],
-    ...mice.flatMap(m => m.points.map(p => [...idVals(d, m), p.date, p.day, num(p[metric])])),
+    [...idHead(d), 'date', 'study_day', 'cage_that_day', 'tail_mark_that_day', metric],
+    ...mice.flatMap(m => m.points.map(p => [...idVals(d, m), p.date, p.day, p.cage, p.mark, num(p[metric])])),
   ];
   if (!mice.some(m => m.points.some(p => p[metric] !== null))) {
     empty(sec, M.tumor ? 'No tumor measurements yet.' : 'No measurements yet.');
@@ -728,10 +998,13 @@ function renderMiceChart(root, t, d, id, metric, title) {
     const { color, dash } = seriesStyle(t, k);
     const width = solo ? 2 : 1.5;
     return {
-      label: m.id, mouse: m.id, cage: m.cage,
-      data: m.points.map((p, i) => ({ x: xv(d, i), y: p[metric], date: p.date, day: p.day })),
+      label: m.id, mouse: m.id, cage: m.cage, $m: m,
+      data: m.points.map((p, i) => ({
+        x: xv(d, i), y: p[metric], date: p.date, day: p.day, cage: p.cage, mark: p.mark, moved: p.moved, end: p.end, note: p.note,
+      })),
       $color: color, $ring: t.surface, $width: width, borderDash: dash,
-      pointRadius: solo ? 3.5 : 2.5, pointHoverRadius: 6, pointBorderWidth: 1, spanGaps: true,
+      pointStyle: markerStyle, pointRadius: markerRadius(solo ? 3.5 : 2.5), pointHoverRadius: markerRadius(6),
+      pointBorderWidth: markerBorder, spanGaps: true,
       endLabel: solo || m.id === state.focus ? m.id : null,
     };
   });
@@ -741,7 +1014,15 @@ function renderMiceChart(root, t, d, id, metric, title) {
   const opts = chartOptions(t, d, metric);
   opts.interaction = { mode: 'nearest', intersect: false };
   if (datasets.some(ds => ds.endLabel)) opts.layout.padding.right = 44;
-  opts.plugins.tooltip.callbacks.label = c => `Mouse ${c.dataset.label}: ${M.val(c.raw.y)}`;
+  opts.plugins.tooltip.callbacks.label = c => {
+    const where = placeLong(c.raw.cage, c.raw.mark);
+    return `Mouse ${c.dataset.label}${where ? ` (${where})` : ''}: ${M.val(c.raw.y)}`;
+  };
+  opts.plugins.tooltip.callbacks.afterLabel = c => [
+    c.raw.moved ? `◆ Moved from ${placeLong(c.raw.moved.cage, c.raw.moved.mark)}` : '',
+    c.raw.end ? `✕ ${endText(c.dataset.$m)}` : '',
+    c.raw.note ? `Note: ${c.raw.note}` : '',
+  ].filter(Boolean);
   if (!solo) {
     opts.plugins.legend.labels.generateLabels = cageLegend(t, d).generateLabels;
     opts.plugins.legend.onClick = cageLegend(t, d).onClick;
@@ -793,7 +1074,11 @@ function renderLatestBars(root, t, d, id, metric, title) {
   opts.plugins.legend.labels.generateLabels = cageLegend(t, d, 'rect').generateLabels;
   opts.plugins.legend.onClick = cageLegend(t, d).onClick;
   opts.plugins.tooltip.callbacks.title = items => (items.length ? `Mouse ${rows[items[0].dataIndex].id}` : '');
-  opts.plugins.tooltip.callbacks.label = c => `${M.val(c.raw)} · ${cageName(d, rows[c.dataIndex].cage)}`;
+  opts.plugins.tooltip.callbacks.label = c => {
+    const r = rows[c.dataIndex];
+    const where = placeLong(realCage(r), r.mouse);
+    return `${M.val(c.raw)} · ${d.unit === 'group' ? `${cageName(d, r.cage)}${where ? `, ${where}` : ''}` : where}`;
+  };
   opts.onHover = (e, els) => { e.native.target.style.cursor = els.length ? 'pointer' : ''; };
   opts.onClick = (_e, els) => { if (els.length) setFocus(rows[els[0].index].id, true); };
   const datasets = [{
@@ -809,12 +1094,16 @@ function renderLatestBars(root, t, d, id, metric, title) {
 const FLAGS = {
   'loss-alert': { cls: 'critical', icon: '⛔', text: 'Lost ≥ 20%', summary: 'lost ≥ 20%' },
   'loss-warning': { cls: 'warning', icon: '⚠', text: 'Lost ≥ 15%', summary: 'lost ≥ 15%' },
+  ended: { cls: 'ended', icon: '✕', text: '', summary: 'ended (euthanized, found dead or removed)' },
   missing: { cls: 'missing', icon: '○', text: 'No data since', summary: 'no data in the latest session' },
 };
-const FLAG_RANK = r => (r.flags.includes('loss-alert') ? 3 : r.flags.includes('loss-warning') ? 2 : r.flags.includes('missing') ? 1 : 0);
+const FLAG_ORDER = ['loss-alert', 'loss-warning', 'ended', 'missing'];
+const FLAG_RANK = r => { const k = FLAG_ORDER.findIndex(f => r.flags.includes(f)); return k < 0 ? 0 : FLAG_ORDER.length - k; };
+const flagText = (r, f) => (f === 'ended' ? endText(r) : `${FLAGS[f].text}${f === 'missing' ? ` ${fmtDate(ts(r.lastSeen))}` : ''}`);
 
 const TABLE_COLS = [
   { key: 'id', label: 'Mouse' },
+  { key: 'where', label: 'Cage · tail' },
   { key: 'weight', label: 'Weight (g)', show: v => fmt(v, 2) },
   { key: 'pct', label: 'Change', show: v => (v === null ? '—' : `${fmtSigned(v)}%`) },
   { key: 'volume', label: 'Tumor vol.', show: v => fmt(v) },
@@ -828,8 +1117,9 @@ function sortRows(d, rows) {
   const pos = r => d.cages.indexOf(r.cage);
   return [...rows].sort((a, b) => {
     if (key === 'id') {
-      return dir * (pos(a) - pos(b) || byNatural(a.realCage ?? a.cage, b.realCage ?? b.cage) || byNatural(a.mouse, b.mouse));
+      return dir * (pos(a) - pos(b) || byNatural(realCage(a), realCage(b)) || byNatural(a.mouse, b.mouse) || byNatural(a.id, b.id));
     }
+    if (key === 'where') return dir * (byNatural(realCage(a), realCage(b)) || byNatural(a.mouse, b.mouse) || byNatural(a.id, b.id));
     const va = val(a), vb = val(b);
     if (va === null && vb === null) return 0;
     if (va === null) return 1; // not measured: always last
@@ -838,8 +1128,9 @@ function sortRows(d, rows) {
   });
 }
 
-const mouseCell = (d, id, cage) =>
-  `<th scope="row"><span class="dot" style="background:${seriesVar(d.cages.indexOf(cage))}"></span>${escapeHtml(id)}</th>`;
+const mouseCell = (d, id, cage, ended = '') =>
+  `<th scope="row"><span class="dot" style="background:${seriesVar(d.cages.indexOf(cage))}"></span>${escapeHtml(id)}${
+    ended ? ` <span class="end-mark" title="${escapeHtml(ended)}" aria-label="${escapeHtml(ended)}">✕</span>` : ''}</th>`;
 
 function renderLatestTable(root, d) {
   const shown = shownCages(d);
@@ -859,18 +1150,19 @@ function renderLatestTable(root, d) {
       c.key === key ? (dir === 1 ? '▲' : '▼') : ''}</span></button></th>`;
   }).join('');
   const body = rows.map(r => {
-    const flags = r.flags.map(f => `<span class="flag ${FLAGS[f].cls}">${FLAGS[f].icon} ${FLAGS[f].text}${
-      f === 'missing' ? ` ${fmtDate(ts(r.lastSeen))}` : ''}</span>`).join(' ');
-    const rowCls = ['loss-alert', 'loss-warning', 'missing'].find(f => r.flags.includes(f));
+    const flags = r.flags.map(f => `<span class="flag ${FLAGS[f].cls}">${FLAGS[f].icon} ${escapeHtml(flagText(r, f))}</span>`).join(' ');
+    const rowCls = FLAG_ORDER.find(f => r.flags.includes(f));
     const cls = [rowCls ? FLAGS[rowCls].cls : '', r.id === state.focus ? 'focused' : ''].join(' ').trim();
-    return `<tr class="${cls}" data-mouse="${escapeHtml(r.id)}" tabindex="0">${mouseCell(d, r.id, r.cage)}${
-      TABLE_COLS.slice(1, -1).map(c => `<td>${c.show(r[c.key])}</td>`).join('')}<td>${flags}</td></tr>`;
+    return `<tr class="${cls}" data-mouse="${escapeHtml(r.id)}" tabindex="0">${mouseCell(d, r.id, r.cage)}<td class="where">${
+      escapeHtml(placeText(realCage(r), r.mouse))}</td>${
+      TABLE_COLS.slice(2, -1).map(c => `<td>${c.show(r[c.key])}</td>`).join('')}<td>${flags}</td></tr>`;
   }).join('');
   sec.insertAdjacentHTML('beforeend', `<div class="table-wrap"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`);
   root.appendChild(sec);
   state.views.table.rows = () => [
-    [...idHead(d), 'weight_g', 'weight_pct_change', 'tumor_volume', 'relative_tumor_volume', 'last_seen', 'flags'],
-    ...rows.map(r => [...idVals(d, r), num(r.weight), num(r.pct), num(r.volume), num(r.rtv), r.lastSeen, r.flags.join(' ')]),
+    [...idHead(d), 'tail_mark', 'weight_g', 'weight_pct_change', 'tumor_volume', 'relative_tumor_volume', 'last_seen', 'status', 'end_date', 'end_reason', 'flags'],
+    ...rows.map(r => [...idVals(d, r), r.mouse, num(r.weight), num(r.pct), num(r.volume), num(r.rtv), r.lastSeen,
+      r.status, r.endDate, r.endReason, r.flags.join(' ')]),
   ];
 }
 
@@ -906,13 +1198,17 @@ function renderHeatmap(root, d) {
   const body = mice.map(m => {
     const cells = m.points.map(p => {
       const v = p[metric];
-      const strong = metric === 'pct' && v !== null && v <= LOSS_WARNING ? ' class="strong"' : '';
+      const after = m.ended && p.date > m.endDate;
+      const cls = [metric === 'pct' && v !== null && v <= LOSS_WARNING ? 'strong' : '', p.moved ? 'moved' : '', after ? 'after-end' : ''].filter(Boolean);
       const text = v === null ? '' : metric === 'pct' ? fmtSigned(v) : v.toFixed(M.digits);
-      return `<td style="${shade(v)}"${strong} title="${escapeHtml(m.id)} · ${fmtLongDate(p.date)}: ${v === null ? 'not measured' : M.val(v)}">${text}</td>`;
+      const what = after ? endText(m) : v === null ? 'not measured' : M.val(v);
+      const where = placeLong(p.cage, p.mark);
+      const tip = `${m.id}${where ? ` (${where})` : ''} · ${fmtLongDate(p.date)}: ${what}${p.moved ? ` · moved from ${placeLong(p.moved.cage, p.moved.mark)}` : ''}`;
+      return `<td style="${after ? '' : shade(v)}"${cls.length ? ` class="${cls.join(' ')}"` : ''} title="${escapeHtml(tip)}">${text}</td>`;
     }).join('');
     const cls = [m.cage !== prevCage && prevCage !== null ? 'cage-start' : '', m.id === state.focus ? 'focused' : ''].join(' ').trim();
     prevCage = m.cage;
-    return `<tr class="${cls}" data-mouse="${escapeHtml(m.id)}" tabindex="0">${mouseCell(d, m.id, m.cage)}${cells}</tr>`;
+    return `<tr class="${cls}" data-mouse="${escapeHtml(m.id)}" tabindex="0">${mouseCell(d, m.id, m.cage, m.ended ? endText(m) : '')}${cells}</tr>`;
   }).join('');
   sec.insertAdjacentHTML('beforeend', `<div class="table-wrap heat"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`);
   root.appendChild(sec);
@@ -920,6 +1216,48 @@ function renderHeatmap(root, d) {
     [...idHead(d), ...d.dates],
     ...mice.map(m => [...idVals(d, m), ...m.points.map(p => num(p[metric]))]),
   ];
+}
+
+// Kaplan–Meier curve per cage or group: share of mice that have not died or reached a humane endpoint.
+function renderSurvival(root, t, d) {
+  const shown = shownCages(d);
+  const curves = survival(d.mice, d.cages, d.dates);
+  const ended = d.mice.filter(m => shown.includes(m.cage) && m.ended).length;
+  const sub = `Kaplan–Meier. Found dead or euthanized at an endpoint ends the line; euthanized at end of study or removed is censored.${
+    ended ? '' : ' No mouse has ended yet.'}`;
+  const sec = card('survival', `Survival by ${d.unit}`, sub, CHART_TOOLS, { hint: `Click a ${d.unit} in the legend to hide it.` });
+  root.appendChild(sec);
+  state.views.survival.rows = () => [
+    [d.unit, 'date', 'study_day', 'surviving_pct', 'at_risk', 'events'],
+    ...curves.filter(c => shown.includes(c.key)).flatMap(c => c.points.map(p =>
+      [cageText(d, c.key), p.date, Math.round((ts(p.date) - ts(d.dates[0])) / DAY), num(p.s * 100), p.atRisk, p.events])),
+  ];
+  const n = curves.length;
+  const datasets = curves.map((c, k) => {
+    const { color, dash } = seriesStyle(t, k);
+    const nudge = (k - (n - 1) / 2) * 0.6; // keep overlapping 100% lines apart
+    return {
+      label: cageName(d, c.key), cage: c.key, hidden: !shown.includes(c.key),
+      data: c.points.map(p => ({ x: xOfDate(d, p.date), y: p.s * 100 + nudge, s: p.s, date: p.date,
+        day: Math.round((ts(p.date) - ts(d.dates[0])) / DAY), atRisk: p.atRisk, events: p.events })),
+      stepped: true, borderColor: color, backgroundColor: color, borderDash: dash, borderWidth: 2,
+      pointRadius: c.points.map(p => (p.events ? 4 : 0)), pointHoverRadius: 5, pointBorderColor: t.surface, pointBorderWidth: 1.5,
+    };
+  });
+  const opts = chartOptions(t, d, 'pct');
+  opts.scales.x = xScale(t, d, curves.flatMap(c => c.points.map(p => p.date)));
+  opts.scales.y = {
+    type: 'linear', min: 0, max: 105,
+    title: { display: true, text: 'Surviving (%)', color: t.ink2 },
+    ticks: { color: t.muted, stepSize: 20, callback: v => (v <= 100 ? `${v}%` : '') },
+    grid: { color: t.grid }, border: { color: t.axis },
+  };
+  opts.plugins.refLines.lines = [];
+  opts.plugins.legend.labels.generateLabels = cageLegend(t, d).generateLabels;
+  opts.plugins.legend.onClick = cageLegend(t, d).onClick;
+  opts.plugins.tooltip.callbacks.label = c => `${c.dataset.label}: ${fmt(c.raw.s * 100, 0)}% (${c.raw.atRisk} at risk${
+    c.raw.events ? `, ${c.raw.events} ended` : ''})`;
+  state.views.survival.chart = makeChart(chartBox(sec), { type: 'line', data: { datasets }, options: opts });
 }
 
 function renderKpis(d) {
@@ -933,6 +1271,7 @@ function renderKpis(d) {
     [rows.length === d.latest.length ? rows.length : `${rows.length} / ${d.latest.length}`, `mice, ${shown.length} ${d.unit}${shown.length > 1 ? 's' : ''}`, ''],
     [count('loss-alert'), '⛔ lost ≥ 20%', 'critical'],
     [count('loss-warning'), '⚠ lost 15–20%', 'warning'],
+    [count('ended'), '✕ ended', 'ended'],
     [count('missing'), '○ missing latest', 'missing'],
   ];
   box.innerHTML = tiles.map(([value, label, cls]) =>
@@ -963,6 +1302,7 @@ function renderViews() {
   renderGroupChart(root, t, d, 'tumor-group', tm, tm === 'rtv' ? `Relative tumor volume ${by}` : `Tumor volume ${by}`);
   renderMiceChart(root, t, d, 'tumor-mice', tm, tm === 'rtv' ? 'Individual relative tumor volumes' : 'Individual tumor volumes');
   renderLatestBars(root, t, d, 'tumor-latest', tm, `${tm === 'rtv' ? 'Relative tumor volume' : 'Tumor volume'} per mouse`);
+  renderSurvival(root, t, d);
   renderLatestTable(root, d);
   renderHeatmap(root, d);
 }
@@ -976,9 +1316,14 @@ function renderToolbar(d) {
     escapeHtml(cageName(d, c))}. Double-click to show only this ${u}."><span class="dot" style="background:${seriesVar(k)}"></span>${
     escapeHtml(cageText(d, c))}</button>`).join('');
   const grouped = hasGroups();
-  const groupBy = `<div class="seg" role="group" aria-label="Group by"><span class="seg-label">Group by</span>${grouped
-    ? `<div class="seg-buttons"><button type="button" data-pref="by" data-value="cage">Cage</button><button type="button" data-pref="by" data-value="group" title="Your groups, set in the groups panel">My groups</button></div>`
-    : ''}<button type="button" class="chip edit" data-groups-open title="Pick mice and sort them into labelled groups">${grouped ? 'Edit groups' : 'Make groups'}</button></div>`;
+  const byOptions = [
+    hasStudyGroups() && ['group', 'Group', 'Groups from the Mice sheet of the workbook'],
+    ['cage', 'Cage', 'Each mouse’s current cage, with its whole history'],
+    grouped && ['mine', 'My groups', 'Your groups, set in the groups panel on this device'],
+  ].filter(Boolean);
+  const groupBy = `<div class="seg" role="group" aria-label="Group by"><span class="seg-label">Group by</span>${byOptions.length > 1
+    ? `<div class="seg-buttons">${byOptions.map(([v, text, tip]) => `<button type="button" data-pref="by" data-value="${v}" title="${tip}">${text}</button>`).join('')}</div>`
+    : ''}<button type="button" class="chip edit" data-groups-open title="Pick mice and sort them into labelled groups, on this device">${grouped ? 'Edit my groups' : 'Make groups'}</button></div>`;
   const mice = d.cages.map(c => `<optgroup label="${escapeHtml(cageName(d, c))}">${
     d.mice.filter(m => m.cage === c).map(m => `<option value="${escapeHtml(m.id)}">${escapeHtml(m.id)}</option>`).join('')}</optgroup>`).join('');
   bar.innerHTML = `
@@ -1004,7 +1349,8 @@ function syncToolbar() {
   const d = state.derived;
   if (!d) return;
   const shown = shownCages(d);
-  bar.querySelectorAll('[data-pref]').forEach(b => b.setAttribute('aria-pressed', String(state.prefs[b.dataset.pref] === b.dataset.value)));
+  const current = key => (key === 'by' ? effectiveBy() : state.prefs[key]);
+  bar.querySelectorAll('[data-pref]').forEach(b => b.setAttribute('aria-pressed', String(current(b.dataset.pref) === b.dataset.value)));
   bar.querySelectorAll('[data-cage]').forEach(b => b.setAttribute('aria-pressed', String(shown.includes(b.dataset.cage))));
   const all = bar.querySelector('[data-cage-all]');
   if (all) all.setAttribute('aria-pressed', String(shown.length === d.cages.length));
@@ -1022,10 +1368,28 @@ function setPref(key, value) {
   renderViews();
 }
 
-/** Rebuild the view data (by cage or by group) and redraw the toolbar, views and groups panel. */
+const hasStudyGroups = () => Boolean(state.base && state.base.mice.some(m => m.group));
+
+/** What the views are grouped by: the saved choice if it is available, else workbook groups, else cage. */
+function effectiveBy() {
+  const p = state.prefs.by;
+  if (p === 'cage' || (p === 'group' && hasStudyGroups()) || (p === 'mine' && hasGroups())) return p;
+  if (p === 'group' && hasGroups()) return 'mine'; // "group" meant the device's groups before the workbook
+  return hasStudyGroups() ? 'group' : 'cage';
+}
+
+/** The view data: by current cage, or re-keyed by the workbook's groups or the user's own. */
+function viewData() {
+  const by = effectiveBy();
+  if (by === 'group') return applyGroups(state.base, studyGrouping(state.base));
+  if (by === 'mine') return applyGroups(state.base, state.grouping);
+  return state.base;
+}
+
+/** Rebuild the view data and redraw the toolbar, views and groups panel. */
 function refresh() {
   if (!state.base) return;
-  state.derived = state.prefs.by === 'group' && hasGroups() ? applyGroups(state.base, state.grouping) : state.base;
+  state.derived = viewData();
   renderToolbar(state.derived);
   renderViews();
   renderGroupPanel();
@@ -1075,7 +1439,7 @@ function updateGrouping(change) {
   state.grouping = cleanGrouping(state.grouping);
   if (hasGroups()) store.set(groupsKey(state.name), JSON.stringify(state.grouping));
   else store.remove(groupsKey(state.name));
-  if (!had && hasGroups()) { state.prefs.by = 'group'; savePrefs(); }
+  if (!had && hasGroups()) { state.prefs.by = 'mine'; savePrefs(); }
   refresh();
 }
 
@@ -1116,8 +1480,9 @@ const SELECT_RULES = {
   ungrouped: r => groupOf(state.grouping, r.id) === UNGROUPED,
 };
 
+// Mice that have ended are never ticked by a rule (they can still be ticked by hand).
 function selectWhere(rule) {
-  state.selected = new Set(state.base.latest.filter(rule).map(r => r.id));
+  state.selected = new Set(state.base.latest.filter(r => !r.flags.includes('ended') && rule(r)).map(r => r.id));
   renderGroupPanel();
 }
 
@@ -1131,6 +1496,14 @@ function groupRows() {
     ['group', 'mouse', 'cage', 'weight_g', 'weight_pct_change', 'tumor_volume'],
     ...rows.map(r => [groupLabel(g, groupOf(g, r.id)), r.id, r.cage, num(r.weight), num(r.pct), num(r.volume)]),
   ];
+}
+
+/** Mouse ID and group for the workbook's Mice sheet: in that sheet's order, then any mice not on it. */
+function workbookGroupRows() {
+  const g = state.grouping;
+  const order = ((state.parsed && state.parsed.mice) || []).map(m => m.id);
+  const ids = [...order, ...state.base.mice.map(m => m.id).filter(id => !order.includes(id))];
+  return [['Mouse ID', 'Group'], ...ids.map(id => { const gid = groupOf(g, id); return [id, gid === UNGROUPED ? '' : groupLabel(g, gid)]; })];
 }
 
 // For pasting into the Obsidian note. The columns differ from a session table, so the parser ignores it.
@@ -1197,7 +1570,8 @@ function renderGroupPanel() {
   const body = rows.map(r => {
     const gid = of(r.id);
     return `<tr class="${sel.has(r.id) ? 'picked' : ''}"><td class="gp-check"><input type="checkbox" data-sel="${escapeHtml(r.id)}"${sel.has(r.id) ? ' checked' : ''} aria-label="Select mouse ${escapeHtml(r.id)}"></td>`
-      + `<th scope="row">${escapeHtml(r.id)}</th><td>${fmt(r.weight, 2)}</td><td>${r.pct === null ? '—' : `${fmtSigned(r.pct)}%`}</td><td>${fmt(r.volume)}</td>`
+      + `<th scope="row">${escapeHtml(r.id)}${r.flags.includes('ended') ? ` <span class="end-mark" title="${escapeHtml(endText(r))}">✕</span>` : ''}</th><td class="where">${
+        escapeHtml(placeText(r.cage, r.mouse))}</td><td>${fmt(r.weight, 2)}</td><td>${r.pct === null ? '—' : `${fmtSigned(r.pct)}%`}</td><td>${fmt(r.volume)}</td>`
       + `<td class="gp-group">${dot(gid)}<select data-assign="${escapeHtml(r.id)}" aria-label="Group of mouse ${escapeHtml(r.id)}">${options(gid)}</select></td></tr>`;
   }).join('');
 
@@ -1209,7 +1583,7 @@ function renderGroupPanel() {
   box.innerHTML = `
     <div class="gp-head">
       <div class="titles"><h2 id="group-panel-title">Groups</h2>
-        <p class="sub">Tick mice, then put them in a group or spread them across the groups. Saved on this device for this note.</p></div>
+        <p class="sub">Tick mice, then put them in a group or spread them across the groups. Saved on this device for this file.</p></div>
       <button type="button" class="tool" data-gp="close" title="Close (Esc)" aria-label="Close">${icon('collapse')}</button>
     </div>
     <div class="gp-body">
@@ -1222,6 +1596,7 @@ function renderGroupPanel() {
         <div class="gp-actions">
           <button type="button" class="button small primary" data-gp="add">+ Add group</button>
           ${groupsReady ? `<button type="button" class="button small" data-gp="copy" title="Group, mouse and latest values as a table for Excel or Prism">Copy table</button>
+          <button type="button" class="button small" data-gp="workbook" title="Mouse ID and group, in the order of the workbook’s Mice sheet">Copy for workbook</button>
           <button type="button" class="button small" data-gp="markdown" title="A Markdown table to paste into the note">Copy for note</button>
           <button type="button" class="button small" data-gp="csv">CSV</button>
           <button type="button" class="button small quiet" data-gp="clear">Delete all groups</button>` : ''}
@@ -1246,7 +1621,7 @@ function renderGroupPanel() {
         </div>
         <div class="gp-row"><span class="seg-label">Sort</span>${segPanelSort()}</div>
         <div class="table-wrap"><table>
-          <thead><tr><th></th><th scope="col">Mouse</th><th scope="col">Weight (g)</th><th scope="col">Change</th><th scope="col">Tumor vol.</th><th scope="col">Group</th></tr></thead>
+          <thead><tr><th></th><th scope="col">Mouse</th><th scope="col">Cage · tail</th><th scope="col">Weight (g)</th><th scope="col">Change</th><th scope="col">Tumor vol.</th><th scope="col">Group</th></tr></thead>
           <tbody>${body}</tbody></table></div>
       </section>
     </div>`;
@@ -1277,6 +1652,7 @@ function panelClick(el) {
   else if (ds.gp === 'clear') {
     if (confirm('Delete all groups? The mice stay in the note; only the grouping is removed.')) updateGrouping(g => { g.groups = []; g.assign = {}; });
   } else if (ds.gp === 'copy') copyText(toTsv(groupRows()), 'Groups copied. Paste them into Excel, Sheets or Prism.');
+  else if (ds.gp === 'workbook') copyText(toTsv(workbookGroupRows()), 'Mouse ID and group copied, in the Mice sheet’s order. Paste them into the workbook, or give them to Claude.');
   else if (ds.gp === 'markdown') copyText(groupMarkdown(), 'Groups copied as Markdown. Paste them into the note, under their own heading.');
   else if (ds.gp === 'csv') download(new Blob([toCsv(groupRows())], { type: 'text/csv' }), fileName('groups', 'csv'));
   else if (ds.gp && ds.gp.startsWith('sort-')) { state.panelSort = ds.gp.slice(5); renderGroupPanel(); }
@@ -1318,7 +1694,7 @@ function panelInput(e) {
 
 // Redraw the dashboard behind the panel but leave the panel (and whatever has focus in it) alone.
 function refreshKeepFocus() {
-  state.derived = state.prefs.by === 'group' && hasGroups() ? applyGroups(state.base, state.grouping) : state.base;
+  state.derived = viewData();
   renderToolbar(state.derived);
   renderViews();
 }
@@ -1334,7 +1710,7 @@ const toCsv = rows => `${rows.map(r => r.map(csvCell).join(',')).join('\n')}\n`;
 const toTsv = rows => rows.map(r => r.map(v => (v === null || v === undefined ? '' : String(v))).join('\t')).join('\n');
 
 function fileName(what, ext) {
-  const base = (state.name || 'study').replace(/\.md$/i, '').replace(/[^\w.-]+/g, '-').replace(/^-+|-+$/g, '');
+  const base = (state.name || 'study').replace(/\.(md|xlsx)$/i, '').replace(/[^\w.-]+/g, '-').replace(/^-+|-+$/g, '');
   return `${base}-${what}-${state.derived.latestDate}.${ext}`;
 }
 
@@ -1405,7 +1781,7 @@ function chartFigure(id, scale = 3) {
   }
 }
 
-const CHART_IDS = ['weight-group', 'weight-mice', 'weight-latest', 'tumor-group', 'tumor-mice', 'tumor-latest'];
+const CHART_IDS = ['weight-group', 'weight-mice', 'weight-latest', 'tumor-group', 'tumor-mice', 'tumor-latest', 'survival'];
 
 /** Every chart in one image, three per row: weight on top, tumor below. */
 function dashboardFigure(scale = 2) {
@@ -1437,10 +1813,13 @@ function dashboardFigure(scale = 2) {
 /** Long ("tidy") table of every measurement and derived value. */
 function allDataRows() {
   const d = state.base;
-  const g = hasGroups() ? [m => { const id = groupOf(state.grouping, m.id); return id === UNGROUPED ? '' : groupLabel(state.grouping, id); }] : [];
+  const mine = hasGroups() ? [m => { const id = groupOf(state.grouping, m.id); return id === UNGROUPED ? '' : groupLabel(state.grouping, id); }] : [];
+  const study = hasStudyGroups();
   return [
-    ['mouse', 'cage', ...(g.length ? ['group'] : []), 'date', 'study_day', 'weight_g', 'weight_pct_change', 'tumor_length', 'tumor_breadth', 'tumor_volume', 'relative_tumor_volume'],
-    ...d.mice.flatMap(m => m.points.map(p => [m.id, m.cage, ...g.map(f => f(m)), p.date, p.day, p.weight, num(p.pct), p.length, p.breadth, num(p.volume), num(p.rtv)])),
+    ['mouse', 'current_cage', 'current_tail_mark', ...(study ? ['group'] : []), ...(mine.length ? ['my_group'] : []), 'status', 'end_date', 'end_reason',
+      'date', 'study_day', 'cage', 'tail_mark', 'weight_g', 'weight_pct_change', 'tumor_length', 'tumor_breadth', 'tumor_volume', 'relative_tumor_volume', 'note'],
+    ...d.mice.flatMap(m => m.points.map(p => [m.id, m.cage, m.mouse, ...(study ? [m.group] : []), ...mine.map(f => f(m)), m.status, m.endDate, m.endReason,
+      p.date, p.day, p.cage, p.mark, p.weight, num(p.pct), p.length, p.breadth, num(p.volume), num(p.rtv), p.note])),
   ];
 }
 
@@ -1495,8 +1874,8 @@ function renderWarnings(warnings) {
   if (!warnings.length) { box.hidden = true; box.innerHTML = ''; return; }
   box.hidden = false;
   const open = warnings.length <= 3 && !window.matchMedia('(min-width: 1000px)').matches;
-  box.innerHTML = `<details${open ? ' open' : ''}><summary>${warnings.length} problem${warnings.length > 1 ? 's' : ''} reading the note</summary><ul>${
-    warnings.map(w => `<li><span class="ln">Line ${w.line}</span> ${escapeHtml(w.message)}</li>`).join('')}</ul></details>`;
+  box.innerHTML = `<details${open ? ' open' : ''}><summary>${warnings.length} problem${warnings.length > 1 ? 's' : ''} reading the file</summary><ul>${
+    warnings.map(w => `<li><span class="ln">${escapeHtml(w.where || `Line ${w.line}`)}</span> ${escapeHtml(w.message)}</li>`).join('')}</ul></details>`;
 }
 
 function escapeHtml(s) {
@@ -1509,22 +1888,24 @@ function setStatus(html) {
   el.title = el.textContent;
 }
 
-/** Parse, derive and draw note text. Returns false (and draws nothing) if the note has no sessions. */
-function show(text, name, savedAt) {
-  const parsed = parseNote(text);
+/** Derive and draw parse output. Returns false (and draws nothing) if there are no sessions. */
+function show(parsed, name, savedAt) {
   renderWarnings(parsed.warnings);
   if (!parsed.sessions.length) {
-    state.derived = state.base = null;
+    state.derived = state.base = state.parsed = null;
     state.panel = false;
     renderGroupPanel();
     document.getElementById('toolbar').hidden = true;
     renderViews();
-    setStatus(`<strong>${escapeHtml(name)}</strong> has no measurement sessions. Each session starts with a heading like <code>## 2026-11-05</code> followed by the measurement table.`);
+    setStatus(/\.xlsx$/i.test(name)
+      ? `<strong>${escapeHtml(name)}</strong> has no measurements. The Measurements sheet needs a header row (Date, Cage, Tail mark, Mouse ID, Weight (g), Tumor Length, Tumor Breadth) and one row per mouse per session.`
+      : `<strong>${escapeHtml(name)}</strong> has no measurement sessions. Each session starts with a heading like <code>## 2026-11-05</code> followed by the measurement table.`);
     return false;
   }
   const derived = derive(parsed);
   if (name !== state.name) state.selected = new Set();
   state.base = derived;
+  state.parsed = parsed;
   state.name = name;
   state.grouping = loadGrouping(name);
   if (!derived.mice.some(m => m.id === state.focus)) state.focus = null;
@@ -1535,11 +1916,41 @@ function show(text, name, savedAt) {
   return true;
 }
 
-function loadText(text, name) {
+/** Draw and remember parse output. A workbook is remembered parsed; a note as its text. */
+function load(parsed, name, keep) {
   const savedAt = Date.now();
-  if (show(text, name, savedAt) && !store.set(STORE_NOTE, JSON.stringify({ name, text, savedAt }))) {
+  if (show(parsed, name, savedAt) && !store.set(STORE_NOTE, JSON.stringify({ name, ...keep, savedAt }))) {
     document.getElementById('status').insertAdjacentHTML('beforeend', ' · <em>not remembered (storage unavailable)</em>');
   }
+}
+
+const loadText = (text, name) => load(parseNote(text), name, { text });
+
+// SheetJS (vendor/xlsx.mini.min.js, ~280 kB) is only fetched when a workbook is opened.
+let xlsxLib = null;
+function loadXlsxLib() {
+  if (typeof XLSX !== 'undefined') return Promise.resolve(XLSX); // eslint-disable-line no-undef
+  xlsxLib = xlsxLib || new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = 'vendor/xlsx.mini.min.js';
+    s.onload = () => resolve(window.XLSX);
+    s.onerror = () => { xlsxLib = null; reject(new Error('could not load the workbook reader')); };
+    document.head.appendChild(s);
+  });
+  return xlsxLib;
+}
+
+async function loadWorkbook(bytes, name) {
+  const lib = await loadXlsxLib();
+  const parsed = parseWorkbook(readWorkbookSheets(lib, bytes));
+  load(parsed, name, { parsed });
+}
+
+/** A chosen file: a workbook (zip, starts with "PK") or a Markdown note. */
+async function loadFile(file) {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  if (bytes[0] === 0x50 && bytes[1] === 0x4b) await loadWorkbook(bytes, file.name);
+  else loadText(new TextDecoder().decode(bytes), file.name);
 }
 
 // Charts take their height from the space left under the header (CSS var --top), so the two
@@ -1561,27 +1972,24 @@ function init() {
     const file = input.files && input.files[0];
     if (!file) return;
     input.value = '';
-    if (file.size > 5 * 1024 * 1024) { setStatus(`<strong>${escapeHtml(file.name)}</strong> is too large to be a note.`); return; }
-    const reader = new FileReader();
-    reader.onload = () => loadText(String(reader.result), file.name);
-    reader.onerror = () => setStatus(`Could not read <strong>${escapeHtml(file.name)}</strong>.`);
-    reader.readAsText(file);
+    if (file.size > 10 * 1024 * 1024) { setStatus(`<strong>${escapeHtml(file.name)}</strong> is too large to be a study file.`); return; }
+    loadFile(file).catch(e => setStatus(`Could not read <strong>${escapeHtml(file.name)}</strong> (${escapeHtml(e.message || e)}).`));
   });
 
   document.getElementById('demo').addEventListener('click', async () => {
     try {
-      const res = await fetch('demo/synthetic-demo.md');
+      const res = await fetch('demo/synthetic-demo.xlsx');
       if (!res.ok) throw new Error(String(res.status));
-      loadText(await res.text(), 'Synthetic demo');
+      await loadWorkbook(new Uint8Array(await res.arrayBuffer()), 'Synthetic demo.xlsx');
     } catch {
-      setStatus('Could not load the demo note.');
+      setStatus('Could not load the demo workbook.');
     }
   });
 
   document.getElementById('forget').addEventListener('click', () => {
     store.remove(STORE_NOTE);
     store.remove(groupsKey(state.name));
-    state.derived = state.base = null;
+    state.derived = state.base = state.parsed = null;
     state.grouping = { groups: [], assign: {} };
     state.selected = new Set();
     state.panel = false;
@@ -1592,7 +2000,7 @@ function init() {
     renderViews();
     renderWarnings([]);
     document.getElementById('forget').hidden = true;
-    setStatus('Note and its groups forgotten on this device. Choose a note to plot it.');
+    setStatus('File and its groups forgotten on this device. Choose a file to plot it.');
   });
 
   // One click handler for the toolbar and every card.
@@ -1655,8 +2063,10 @@ function init() {
 
   let saved = null;
   try { saved = JSON.parse(store.get(STORE_NOTE) || 'null'); } catch { saved = null; }
-  if (!(saved && typeof saved.text === 'string' && show(saved.text, saved.name || 'Saved note', saved.savedAt))) {
-    setStatus('Choose your experiment note (.md) to plot it. It is read on this device and never uploaded.');
+  const savedParse = saved && (saved.parsed && Array.isArray(saved.parsed.sessions) ? saved.parsed
+    : typeof saved.text === 'string' ? parseNote(saved.text) : null);
+  if (!(savedParse && show(savedParse, saved.name || 'Saved file', saved.savedAt))) {
+    setStatus('Choose your study workbook (.xlsx) or experiment note (.md) to plot it. It is read on this device and never uploaded.');
   }
 
   if ('serviceWorker' in navigator && location.protocol !== 'file:') {
@@ -1669,5 +2079,8 @@ if (typeof document !== 'undefined') {
 }
 
 if (typeof module === 'object' && module.exports) {
-  module.exports = { parseNote, derive, summarize, tumorVolume, cleanGrouping, applyGroups, distribute, groupLabel, UNGROUPED };
+  module.exports = {
+    parseNote, parseWorkbook, readWorkbookSheets, derive, summarize, tumorVolume, cleanGrouping, applyGroups, distribute, groupLabel,
+    studyGrouping, survival, UNGROUPED,
+  };
 }

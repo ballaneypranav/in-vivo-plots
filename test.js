@@ -5,7 +5,10 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { parseNote, derive, summarize, tumorVolume, cleanGrouping, applyGroups, distribute, groupLabel, UNGROUPED } = require('./app.js');
+const {
+  parseNote, parseWorkbook, readWorkbookSheets, derive, summarize, tumorVolume, cleanGrouping, applyGroups, distribute, groupLabel,
+  studyGrouping, survival, UNGROUPED,
+} = require('./app.js');
 
 const demo = fs.readFileSync(path.join(__dirname, 'demo', 'synthetic-demo.md'), 'utf8');
 const HEADER = '| Cage No. | Mouse No. | Body Weight (g) | Tumor Length | Tumor Breadth |\n|---:|---:|---:|---:|---:|';
@@ -198,4 +201,110 @@ test('distribute: every mouse placed, sizes within one, balanced by rank', () =>
     assert.equal(new Set(block).size, 3, `block ending m${top - 2}`);
   }
   assert.deepEqual(distribute(rows, [], 'volume'), {});
+});
+
+/* ------------------------------------------------------------- workbook */
+
+const XLSX = require('./vendor/xlsx.mini.min.js');
+const MEAS_HEAD = ['Date', 'Cage', 'Tail mark', 'Mouse ID', 'Weight (g)', 'Tumor Length', 'Tumor Breadth', 'Notes'];
+const MICE_HEAD = ['Mouse ID', 'Sex', 'Group', 'Status', 'End date', 'End reason', 'Notes'];
+const serial = iso => (Date.parse(iso) - Date.UTC(1899, 11, 30)) / 86400000; // Excel date number
+
+test('workbook: rows, Excel dates, text dates, moves and the Mice sheet', () => {
+  const sheets = {
+    Measurements: [
+      MEAS_HEAD,
+      [serial('2026-03-01'), 5, 1, 'A1', 20, null, null, null],
+      [serial('2026-03-01'), 5, 2, 'A2', 21, 3, 2, null],
+      [],
+      ['2026-03-04', 9, 3, 'A1', 19.5, null, null, 'moved'],
+      ['2026-03-04', '5', '2', 'A2', '20.5', '4', '3', null],
+    ],
+    Mice: [MICE_HEAD, ['A1', 'F', 'Drug', 'alive'], ['A2', 'F', 'Vehicle', 'euthanized', serial('2026-03-04'), 'tumor volume']],
+  };
+  const p = parseWorkbook(sheets);
+  assert.deepEqual(p.warnings, []);
+  assert.deepEqual(p.sessions.map(s => s.date), ['2026-03-01', '2026-03-04']);
+  assert.deepEqual(p.sessions[1].rows[0], { id: 'A1', cage: '9', mark: '3', weight: 19.5, length: null, breadth: null, note: 'moved' });
+  assert.deepEqual(p.sessions[1].rows[1], { id: 'A2', cage: '5', mark: '2', weight: 20.5, length: 4, breadth: 3 });
+  assert.equal(p.mice[1].endDate, '2026-03-04');
+
+  const d = derive(p);
+  const a1 = d.mice.find(m => m.id === 'A1');
+  assert.equal(a1.cage, '9', 'current cage');
+  assert.equal(a1.mouse, '3', 'current tail mark');
+  assert.deepEqual(a1.points.map(x => x.cage), ['5', '9']);
+  assert.deepEqual(a1.points[1].moved, { cage: '5', mark: '1' });
+  assert.equal(a1.points[0].moved, undefined);
+  assert.deepEqual(d.cages, ['5', '9']);
+  const a2 = d.latest.find(r => r.id === 'A2');
+  assert.deepEqual(a2.flags, ['ended']);
+  assert.equal(a2.endDay, 3);
+  assert.equal(d.mice.find(m => m.id === 'A2').points[1].end, true);
+  assert.deepEqual(studyGrouping(d).groups.map(g => g.id), ['Drug', 'Vehicle'], 'Mice sheet order');
+  const g = applyGroups(d, studyGrouping(d));
+  assert.deepEqual(g.cages, ['Drug', 'Vehicle']);
+  assert.equal(g.mice.find(m => m.id === 'A1').realCage, '9');
+});
+
+test('workbook: problems are reported with sheet and row', () => {
+  const sheets = {
+    Data: [
+      ['Notes', 'Mouse ID', 'Date', 'Weight (g)', 'Cage', 'Tail mark', 'Tumor Length', 'Tumor Breadth'],
+      [null, 'A1', '2026-03-01', 20, 1, 1],
+      [null, '', '2026-03-01', 20, 1, 2], // no ID
+      [null, 'A1', '2026-03-01', 21, 1, 1], // twice
+      [null, 'A3', 'March 1', 20, 1, 3], // bad date
+      [null, 'A4', '2026-03-01', 'n/a', 1, 1], // bad number, same spot as A1
+      [null, 'A5', '2026-03-01', 20, 2, 1, 3, null], // one tumor side
+      [null, 'A6', '2026-03-09', 20, 2, 2], // after its end date
+    ],
+    Mice: [MICE_HEAD, ['A1', '', '', 'alive'], ['A6', '', '', 'found dead', '2026-03-05'], ['A7', '', '', 'gone']],
+  };
+  const p = parseWorkbook(sheets);
+  const at = p.warnings.map(w => w.where);
+  assert.equal(at[0], 'Mice row 4');
+  assert.match(p.warnings[0].message, /"gone" is not one of/);
+  assert.ok(['Data row 3', 'Data row 4', 'Data row 5'].every(w => at.includes(w)), at.join('; '));
+  assert.ok(p.warnings.some(w => w.where === 'Data row 6' && /both in cage 1, tail 1/.test(w.message)));
+  assert.ok(p.warnings.some(w => w.where === 'Data row 6' && /"n\/a" is not a number/.test(w.message)));
+  assert.ok(p.warnings.some(w => w.where === 'Data row 7' && /only one tumor side/.test(w.message)));
+  assert.ok(p.warnings.some(w => w.where === 'Data row 8' && /ended on 2026-03-05/.test(w.message)));
+  assert.ok(p.warnings.some(w => w.where === 'Mice' && /A4, A5/.test(w.message)), 'measured mice missing from the Mice sheet');
+  assert.ok(p.warnings.some(w => /A7 is gone but has no end date/.test(w.message)));
+  assert.deepEqual(parseWorkbook({ Sheet1: [['a', 'b']] }).sessions, []);
+});
+
+test('survival: endpoints are events, end of study and removed are censored', () => {
+  const m = (id, cage, endDate = null, status = 'alive', endReason = '') => ({ id, cage, ended: Boolean(endDate), endDate, status, endReason });
+  const mice = [
+    m('a', 'X', '2026-01-03', 'euthanized', 'weight loss'),
+    m('b', 'X', '2026-01-05', 'removed'),
+    m('c', 'X', '2026-01-08', 'found dead'),
+    m('d', 'X'),
+    m('e', 'Y', '2026-01-10', 'euthanized', 'end of study'),
+  ];
+  const [x, y] = survival(mice, ['X', 'Y'], ['2026-01-01', '2026-01-10']);
+  assert.deepEqual(x.points.map(p => [p.date, p.atRisk, p.events]),
+    [['2026-01-01', 4, 0], ['2026-01-03', 4, 1], ['2026-01-05', 3, 0], ['2026-01-08', 2, 1], ['2026-01-10', 1, 0]]);
+  close(x.points[1].s, 3 / 4);
+  close(x.points[3].s, (3 / 4) * (1 / 2));
+  assert.deepEqual(y.points.map(p => p.s), [1, 1]);
+});
+
+test('demo workbook: read with SheetJS', () => {
+  const sheets = readWorkbookSheets(XLSX, fs.readFileSync(path.join(__dirname, 'demo', 'synthetic-demo.xlsx')));
+  assert.match(sheets.About[0][0], /SYNTHETIC/);
+  const p = parseWorkbook(sheets);
+  assert.deepEqual(p.warnings, []);
+  assert.deepEqual(p.sessions.map(s => s.date), ['2026-01-05', '2026-01-08', '2026-01-12', '2026-01-15', '2026-01-19']);
+  const d = derive(p);
+  assert.deepEqual(d.cages, ['11', '12', '13']);
+  assert.equal(d.mice.length, 12);
+  assert.equal(d.mice.filter(m => m.points.some(x => x.moved)).length, 12, 'every mouse was rehoused on 2026-01-12');
+  assert.deepEqual(d.latest.filter(r => r.flags.includes('ended')).map(r => r.id).sort(), ['D107', 'D112']);
+  const g = applyGroups(d, studyGrouping(d));
+  assert.deepEqual(g.cages, ['Vehicle', 'Treated']);
+  const cage12 = d.mice.filter(m => m.cage === '12').map(m => m.group);
+  assert.deepEqual([...new Set(cage12)].sort(), ['Treated', 'Vehicle'], 'cage 12 holds both groups');
 });
