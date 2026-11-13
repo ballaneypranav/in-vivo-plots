@@ -750,6 +750,8 @@ const state = {
   panelSort: 'mouse',
   minVolume: '',    // "Tumor vol. ≥" box in the groups panel
   parsed: null,     // parse output, for the workbook's Mice order
+  jumpTo: null,     // card last picked in the jump bar, to tell apart cards that share a row
+  moreSettings: false, // phone: the toolbar's less-used settings unfolded
 };
 
 const savePrefs = () => store.set(STORE_PREFS, JSON.stringify(state.prefs));
@@ -1681,7 +1683,7 @@ function renderViews() {
   root.innerHTML = '';
   document.body.classList.toggle('has-expanded', Boolean(d && state.expanded));
   renderKpis(d && d.dates.length ? d : null);
-  if (!d || !d.dates.length) return;
+  if (!d || !d.dates.length) { renderJump(); return; }
   const t = theme();
   Chart.defaults.font.family = 'system-ui, -apple-system, "Segoe UI", sans-serif';
   Chart.defaults.color = t.ink2;
@@ -1699,6 +1701,61 @@ function renderViews() {
   renderHeatmap(root, d);
   renderDoseCalendar(root, d);
   renderDoses(root, d);
+  renderJump();
+}
+
+/* ------------------------------------------------------------- jump bar */
+
+// One link per topic, in page order, to the topic's first card present. A topic with no card is left out.
+const JUMP = [
+  [['weight-group'], 'Weight'],
+  [['tumor-group'], 'Tumor'],
+  [['survival'], 'Survival'],
+  [['table'], 'Latest values'],
+  [['grid'], 'All measurements'],
+  [['dose-calendar', 'doses'], 'Injections'],
+];
+
+function renderJump() {
+  const nav = document.getElementById('jump');
+  if (!nav) return; // an index.html from before the jump bar, still in the offline cache
+  const links = JUMP.map(([ids, text]) => [ids.find(id => document.getElementById(id)), text]).filter(([id]) => id);
+  nav.hidden = !links.length;
+  nav.innerHTML = links.map(([id, text]) => `<a href="#${id}" data-jump="${id}">${text}</a>`).join('');
+  updateJump();
+}
+
+/** Mark the topic now at the top of the screen. The one last picked wins when it shares a row with that
+ *  topic (cards side by side), or when the page is at its end and the picked card is on screen (it can't reach the top). */
+function updateJump() {
+  const nav = document.getElementById('jump');
+  if (!nav || nav.hidden) return;
+  const links = [...nav.querySelectorAll('[data-jump]')];
+  const navBottom = nav.getBoundingClientRect().bottom;
+  const line = navBottom + (innerHeight - navBottom) / 3;
+  const tops = links.map(a => document.getElementById(a.dataset.jump).getBoundingClientRect().top);
+  let k = 0;
+  tops.forEach((top, i) => { if (top <= line && top > tops[k] + 4) k = i; });
+  const picked = links.findIndex(a => a.dataset.jump === state.jumpTo);
+  const atEnd = scrollY + innerHeight >= document.documentElement.scrollHeight - 2;
+  if (picked >= 0 && (Math.abs(tops[picked] - tops[k]) <= 4
+      || (atEnd && tops[picked] >= navBottom - 4 && tops[picked] < innerHeight))) k = picked;
+  links.forEach((a, i) => (i === k ? a.setAttribute('aria-current', 'location') : a.removeAttribute('aria-current')));
+  // Keep the marked link in view when the bar scrolls sideways (phone). Not scrollIntoView: it would stop a smooth page scroll.
+  const a = links[k];
+  if (a && nav.scrollWidth > nav.clientWidth) {
+    const left = a.offsetLeft - nav.offsetLeft;
+    if (left < nav.scrollLeft || left + a.offsetWidth > nav.scrollLeft + nav.clientWidth) nav.scrollLeft = left - 16;
+  }
+}
+
+function jump(id) {
+  const target = document.getElementById(id);
+  if (!target) return;
+  state.jumpTo = id;
+  const smooth = !window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  target.scrollIntoView({ behavior: smooth ? 'smooth' : 'auto', block: 'start' });
+  updateJump(); // now, in case nothing scrolls (same row, or page end); a smooth scroll updates it as it goes
 }
 
 /* ---------------------------------------------------------------- toolbar */
@@ -1720,9 +1777,13 @@ function renderToolbar(d) {
     : ''}<button type="button" class="chip edit" data-groups-open title="Pick mice and sort them into labelled groups, on this device">${grouped ? 'Edit my groups' : 'Make groups'}</button></div>`;
   const mice = d.cages.map(c => `<optgroup label="${escapeHtml(cageName(d, c))}">${
     d.mice.filter(m => m.cage === c).map(m => `<option value="${escapeHtml(m.id)}">${escapeHtml(m.id)}</option>`).join('')}</optgroup>`).join('');
+  // On a phone only Group by and the group chips show until "More settings" unfolds the rest (CSS);
+  // on wider screens .toolbar-more is display: contents, so its controls sit in the toolbar's own row.
   bar.innerHTML = `
     ${groupBy}
     <div class="seg" role="group" aria-label="${u === 'group' ? 'Groups' : 'Cages'}"><span class="seg-label">${u === 'group' ? 'Groups' : 'Cages'}</span><div class="chips">${chips}<button type="button" class="chip all" data-cage-all>All</button></div></div>
+    <button type="button" class="chip more" data-more-settings aria-controls="toolbar-more">More settings</button>
+    <div class="toolbar-more" id="toolbar-more">
     ${segControl('weight', 'Weight', [['pct', '% change'], ['weight', 'Grams']])}
     ${segControl('tumor', 'Tumor', [['volume', 'Volume'], ['rtv', 'Relative', 'Each mouse’s volume ÷ its first measured volume']])}
     ${segControl('scale', 'Tumor axis', [['linear', 'Linear'], ['log', 'Log']])}
@@ -1733,7 +1794,8 @@ function renderToolbar(d) {
     <div class="seg" role="group" aria-label="Export"><span class="seg-label">Export</span><div class="seg-buttons">
       <button type="button" data-export="png" title="All six charts in one PNG image">Dashboard</button>
       <button type="button" data-export="csv" title="Every measurement and derived value as CSV, one row per mouse per session">Data</button>
-      <button type="button" data-export="print" title="Print, or save as PDF">Print</button></div></div>`;
+      <button type="button" data-export="print" title="Print, or save as PDF">Print</button></div></div>
+    </div>`;
   bar.hidden = false;
   syncToolbar();
 }
@@ -1750,6 +1812,12 @@ function syncToolbar() {
   if (all) all.setAttribute('aria-pressed', String(shown.length === d.cages.length));
   const sel = document.getElementById('focus-mouse');
   if (sel) sel.value = state.focus || '';
+  bar.classList.toggle('open', state.moreSettings);
+  const more = bar.querySelector('[data-more-settings]');
+  if (more) {
+    more.setAttribute('aria-expanded', String(state.moreSettings));
+    more.textContent = state.moreSettings ? 'Fewer settings' : 'More settings';
+  }
 }
 
 function setPref(key, value) {
@@ -2355,7 +2423,12 @@ function trackTop() {
     document.documentElement.style.setProperty('--top', `${Math.round(top)}px`);
   };
   set();
-  if (typeof ResizeObserver !== 'undefined') new ResizeObserver(set).observe(document.querySelector('header'));
+  if (typeof ResizeObserver !== 'undefined') {
+    const ro = new ResizeObserver(set);
+    ro.observe(document.querySelector('header'));
+    const nav = document.getElementById('jump');
+    if (nav) ro.observe(nav);
+  }
   window.addEventListener('resize', set);
 }
 
@@ -2403,6 +2476,7 @@ function init() {
     if (!el || !state.derived) return;
     if (el.closest('#group-panel')) { panelClick(el); return; }
     if (el.dataset.groupsOpen !== undefined) { openGroupPanel(true); return; }
+    if (el.dataset.moreSettings !== undefined) { state.moreSettings = !state.moreSettings; syncToolbar(); return; }
     if (el.dataset.pref) setPref(el.dataset.pref, el.dataset.value);
     else if (el.dataset.cage !== undefined) toggleCage(el.dataset.cage);
     else if (el.dataset.cageAll !== undefined) setHidden([]);
@@ -2454,6 +2528,19 @@ function init() {
   window.addEventListener('beforeprint', fit);
   window.addEventListener('afterprint', fit);
   trackTop();
+
+  // Jump bar: scroll to a topic, and mark the topic in view while scrolling.
+  const jumpBar = document.getElementById('jump');
+  if (jumpBar) jumpBar.addEventListener('click', e => {
+    const a = e.target.closest('[data-jump]');
+    if (!a) return;
+    e.preventDefault();
+    jump(a.dataset.jump);
+  });
+  let spy = 0;
+  const onScroll = () => { if (!spy) spy = requestAnimationFrame(() => { spy = 0; updateJump(); }); };
+  window.addEventListener('scroll', onScroll, { passive: true });
+  window.addEventListener('resize', onScroll);
 
   let saved = null;
   try { saved = JSON.parse(store.get(STORE_NOTE) || 'null'); } catch { saved = null; }

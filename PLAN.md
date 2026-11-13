@@ -10,7 +10,7 @@ A static web app, hosted on GitHub Pages, that plots mouse study measurements (b
 ## Constraints
 - **No study data leaves the device.** The file is read in the browser; nothing is uploaded. The repo is public (free GitHub Pages) and holds **code only**. Real notes for testing go in `private/`, which is gitignored. A demo file in the repo must be synthetic and labelled so.
 - **No build step.** Plain HTML, CSS and JavaScript that GitHub Pages serves as-is.
-- **Phone first, desktop dashboard.** One column, readable at 375 px. From 1000 px the views fill the window as a dashboard (2 columns; 3 charts per row from 1500 px), with both chart rows fitting a 1080p or 864p screen. Light and dark themes, following the OS or a toggle.
+- **Phone first, desktop dashboard.** One column, readable at 375 px. From 1000 px the views fill the window as a dashboard. With 2 columns each measure's time charts share a row and its per-mouse bars run full width beneath them (weight, then tumor). From 1500 px there are 3 charts per row, with both chart rows fitting a 1080p or 864p screen. Light and dark themes, following the OS or a toggle.
 - **Works offline** once loaded (service worker + web app manifest, installable to the home screen).
 - `localStorage` access wrapped in `try/catch`; the app must work when storage is unavailable.
 
@@ -92,7 +92,9 @@ Parsing rules:
 - **Summary per group per date:** mean ± SEM and `n` over mice with a value.
 
 ## Views
-A toolbar above the charts scopes every view: group by the workbook's groups, current cage, or the user's groups (with a button that opens the groups panel), cages or groups shown, weight as % change or grams, tumor as volume or relative volume (÷ the mouse's first measured volume), linear or log tumor axis, error bars (SEM, SD, none), x axis as date or study day (days since the first session), a highlighted mouse, theme. Settings are saved on the device.
+A toolbar above the charts scopes every view: group by the workbook's groups, current cage, or the user's groups (with a button that opens the groups panel), cages or groups shown, weight as % change or grams, tumor as volume or relative volume (÷ the mouse's first measured volume), linear or log tumor axis, error bars (SEM, SD, none), x axis as date or study day (days since the first session), a highlighted mouse, theme. Settings are saved on the device. Under 700 px only Group by and the chips show; a **More settings** toggle unfolds the rest (not saved).
+
+A jump bar under the toolbar sticks to the top of the screen while scrolling: Weight (view 1), Tumor (4), Survival (7), Latest values (8), All measurements (9), Injections (11), each scrolling to that card, with the topic in view marked (`aria-current`; cards side by side share a row, and the one last picked wins). A topic whose card is absent is left out. It scrolls sideways on a phone and is hidden when printing. It sits outside `<header>` but above `#views`, so `--top` (measured to `#views`) includes it and the dashboard rows are that much shorter. Card ids and order are as before.
 
 1. Body weight per cage over time, mean ± error; reference lines at −15% and −20% in % mode.
 2. Individual body weights, one line per mouse; colored by group or cage, or by mouse with end labels when one is shown. ◆ marks a move (new cage or tail mark), ✕ the end; the tooltip gives the cage and tail mark that day, the move and any note.

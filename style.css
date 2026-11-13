@@ -168,6 +168,35 @@ button:focus-visible, select:focus-visible, tr:focus-visible { outline: 2px soli
 .chip.all[aria-pressed="false"] { text-decoration: none; opacity: 1; }
 .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; flex: none; margin-right: 6px; vertical-align: 0; }
 .chip .dot { margin-right: 0; }
+/* Phone: the settings past Group by and the group chips fold behind "More settings". */
+.toolbar-more { display: contents; }
+.chip.more { color: var(--accent); border-color: var(--accent); font-weight: 600; }
+@media (max-width: 699px) {
+  .toolbar:not(.open) .toolbar-more { display: none; }
+}
+@media (min-width: 700px) {
+  .chip.more { display: none; }
+}
+
+/* Jump bar: sticks to the top of the screen, one link per topic, the topic in view marked. Scrolls
+   sideways on a phone. --top (set by app.js) is measured below it, so the dashboard rows allow for it. */
+.jump {
+  position: sticky; top: 0; z-index: 20;
+  display: flex; gap: 4px; overflow-x: auto; scrollbar-width: none;
+  margin: 8px -16px 0; padding: 6px 16px;
+  background: var(--page); border-bottom: 1px solid var(--border);
+}
+.jump::-webkit-scrollbar { display: none; }
+.jump[hidden] { display: none; }
+.jump a {
+  flex: none; display: inline-flex; align-items: center;
+  min-height: 34px; padding: 0 12px; border-radius: 999px;
+  color: var(--ink-2); font-size: 0.85rem; font-weight: 600; text-decoration: none; white-space: nowrap;
+}
+.jump a:hover { background: var(--accent-wash); color: var(--ink); }
+.jump a:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.jump a[aria-current] { background: var(--accent); color: #fff; }
+#views > section { scroll-margin-top: 60px; }
 
 /* Cards */
 main { display: grid; gap: 16px; padding-top: 12px; }
@@ -368,6 +397,9 @@ body.panel-open::before { content: ""; position: fixed; inset: 0; background: va
   .kpi { flex-direction: row; align-items: baseline; gap: 6px; min-width: 0; padding: 4px 10px; }
   .kpi-value { font-size: 1rem; }
   .warnings { margin-top: 8px; padding: 6px 12px; }
+  .jump { margin: 8px -20px 0; padding: 4px 20px; }
+  .jump a { min-height: 30px; padding: 0 10px; font-size: 0.8rem; }
+  #views > section { scroll-margin-top: 52px; }
   .toolbar { margin-top: 8px; padding: 6px 12px; gap: 6px 14px; }
   .seg-buttons button { padding: 0 8px; min-height: 30px; font-size: 0.8rem; }
   .chip { min-height: 30px; padding: 0 8px; font-size: 0.8rem; }
@@ -380,12 +412,13 @@ body.panel-open::before { content: ""; position: fixed; inset: 0; background: va
   .tool { width: 30px; height: 30px; }
   .card .table-wrap { max-height: max(360px, calc(100vh - var(--top, 190px) - 120px)); }
   /* The chart rows share the screen height under the header (--top is set by app.js); each chart
-     fills whatever its card has left after the title, so cards with taller headers still line up. */
+     fills whatever its card has left after the title, so cards with taller headers still line up.
+     Two columns: each measure's per-mouse bars run full width under its time charts. */
   #views {
     --row-h: max(300px, calc((100vh - var(--top, 190px) - 14px - 16px) / 2));
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    grid-template-rows: repeat(3, var(--row-h)) auto auto;
-    grid-template-areas: "wg wi" "tg ti" "wl tl" "surv tab" "grid grid";
+    grid-template-rows: repeat(4, var(--row-h)) auto auto;
+    grid-template-areas: "wg wi" "wl wl" "tg ti" "tl tl" "surv tab" "grid grid";
   }
   #survival { grid-area: surv; }
   #survival .chart { min-height: 300px; }
@@ -418,7 +451,7 @@ body.panel-open::before { content: ""; position: fixed; inset: 0; background: va
 @media print {
   @page { size: landscape; margin: 10mm; }
   body { max-width: none; padding: 0; background: #fff; }
-  .actions, .toolbar, .tools, .card-tools, footer, .toast, .warnings, .hint, .group-panel { display: none !important; }
+  .actions, .toolbar, .jump, .tools, .card-tools, footer, .toast, .warnings, .hint, .group-panel { display: none !important; }
   body.panel-open::before { display: none; }
   #views { display: grid; grid-template-columns: 1fr 1fr; grid-template-areas: none; gap: 8px; }
   #views > section { grid-area: auto; break-inside: avoid; }

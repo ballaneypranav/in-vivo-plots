@@ -1,7 +1,7 @@
 // Offline support: cache the app shell, serve from cache, refresh the cache in the background.
 // Paths are relative so the app works under /in-vivo-plots/ on GitHub Pages.
 // Bump CACHE when the shell file list changes.
-const CACHE = 'in-vivo-plots-v3';
+const CACHE = 'in-vivo-plots-v4';
 const SHELL = [
   './',
   'index.html',

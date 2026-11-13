@@ -5,14 +5,14 @@ Plots body weight, tumor volume and survival from a mouse study workbook (`.xlsx
 ## Use
 
 1. Open the app and tap **Choose file**, then pick the study's `.xlsx` workbook (or `.md` note) from the vault folder.
-2. The app draws a dashboard. On a desktop screen it fills the window: the weight row and the tumor row each show the mean per group or cage, one line per mouse, and one bar per mouse at the latest session; below them are the survival curve, the latest-values table and a heat map of every measurement. On a phone the same views stack in one column.
+2. The app draws a dashboard. On a desktop screen it fills the window: the weight row and the tumor row each show the mean per group or cage, one line per mouse, and one bar per mouse at the latest session; below them are the survival curve, the latest-values table and a heat map of every measurement, then the injection calendar and table. On a narrower desktop window (under 1500 px) each row's bar chart runs full width under its two line charts, so weight comes first and tumor below it. On a phone the same views stack in one column. A bar under the toolbar (**Weight · Tumor · Survival · Latest values · All measurements · Injections**) stays at the top of the screen as you scroll: tap a topic to jump to it; the topic in view is highlighted.
    - body weight as % change (lines at −15% and −20%) or grams
    - tumor volume (longer × shorter² / 2) or relative to each mouse's first measured volume, on a linear or log axis
    - injections (from the workbook's Injections sheet) as a strip of ▲ under the weight, tumor and survival charts, one row per group or cage; hover or tap it to see the drug, dose and volume and how many mice got it. A hollow ▲ means only some mice in that group or cage were dosed. An **Injection calendar** shows the same doses as month grids (one chip per group or cage and drug, with how many of its mice were dosed; dashed means only some; ● marks measurement days), and an Injections table lists every mouse's drug on each injection day
    - on the individual lines, ◆ marks where a mouse moved cage (or got a new tail mark) and ✕ where it was euthanized, found dead or removed; the tooltip gives the cage and tail mark on that day
    - survival (Kaplan–Meier) per group or cage
    - a latest-values table with each mouse's current cage and tail mark, flagging weight loss ≥ 15% / ≥ 20%, mice that have ended (with date, study day and reason) and mice with no data in the latest session; click a column to sort
-3. The toolbar above the charts sets what every view shows: **Group by** (the workbook's groups, each mouse's current cage, or your own groups), which groups or cages (click a chip to hide or show one, double-click to show only that one), weight and tumor units, error bars (SEM, SD or none), x axis as date or study day, a highlighted mouse (also set by clicking a line, bar or table row), and the theme. The settings are remembered on the device.
+3. The toolbar above the charts sets what every view shows: **Group by** (the workbook's groups, each mouse's current cage, or your own groups), which groups or cages (click a chip to hide or show one, double-click to show only that one), weight and tumor units, error bars (SEM, SD or none), x axis as date or study day, a highlighted mouse (also set by clicking a line, bar or table row), and the theme. The settings are remembered on the device. On a phone only Group by and the group or cage chips show; tap **More settings** for the rest.
    - **Group** uses the Group column of the workbook's Mice sheet. A group can span cages and a cage can hold several groups.
    - **Cage** puts each mouse under the cage it is in now, with its whole history, so a cage's mean is the mean of its current mice.
 4. **Make groups** opens a panel for planning groups on this device: tick mice (all, those with a tumor in the latest session, those with tumor volume ≥ a value, or one by one; mice that have ended are skipped), add and name groups, then put the ticked mice in a group, or spread them evenly across all groups balanced by tumor volume or body weight (click again to re-roll), or at random. Each group's n and mean ± SEM tumor volume, weight and weight change at the latest session are shown so you can check the groups are balanced. **Group by: My groups** draws every view by these groups. They are kept on this device for this file (by file name); **Copy for workbook** copies Mouse ID and group in the Mice sheet's order to put them in the workbook, and **Copy table**, **Copy for note** (Markdown) and **CSV** take them out too.
@@ -38,9 +38,9 @@ No build step. Serve the folder and open it:
 
 ```sh
 python3 -m http.server   # http://localhost:8000
-node --test test.js      # parsers and derived values (synthetic data only); node --test private/ for the real study
-uv venv .venv && uv pip install --python .venv playwright
-.venv/bin/python tools/smoke_test.py [note.md]   # headless-browser check; set CHROMIUM=/path/to/chrome to reuse a browser
+node --test test.js      # parsers and derived values (synthetic data only)
+node --test private/private.test.js   # the real study, if you have it
+uv run --no-project --with playwright==1.64.1 python tools/smoke_test.py [note.md]   # headless-browser check; set CHROMIUM=/path/to/chrome to reuse a browser
 ```
 
 On Windows without Node, VS Code's own Node works: `ELECTRON_RUN_AS_NODE=1 "<VS Code>/Code.exe" --test test.js`.
