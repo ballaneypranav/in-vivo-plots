@@ -7,7 +7,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const {
   parseNote, parseWorkbook, readWorkbookSheets, derive, summarize, tumorVolume, cleanGrouping, applyGroups, distribute, groupLabel,
-  studyGrouping, survival, UNGROUPED,
+  studyGrouping, survival, dosesByKey, doseCalendar, UNGROUPED,
 } = require('./app.js');
 
 const demo = fs.readFileSync(path.join(__dirname, 'demo', 'synthetic-demo.md'), 'utf8');
@@ -292,6 +292,96 @@ test('workbook: problems are reported with sheet and row', () => {
   assert.ok(p.warnings.some(w => w.where === 'Mice' && /A4, A5/.test(w.message)), 'measured mice missing from the Mice sheet');
   assert.ok(p.warnings.some(w => /A7 is gone but has no end date/.test(w.message)));
   assert.deepEqual(parseWorkbook({ Sheet1: [['a', 'b']] }).sessions, []);
+});
+
+test('workbook: Injections sheet, with formula-only rows, warnings and doses per group', () => {
+  const xl = iso => (Date.UTC(...iso.split('-').map((v, i) => (i === 1 ? v - 1 : +v))) - Date.UTC(1899, 11, 30)) / 86400000;
+  const sheets = {
+    Measurements: [
+      ['Animal ID', 'Cage ID', 'Tail mark', 'Date', 'Weight (g)', 'Tumor Length', 'Tumor Breadth'],
+      ['A1', '1', '1', xl('2026-01-01'), 20, null, null],
+      ['A2', '1', '2', xl('2026-01-01'), 21, null, null],
+      ['B1', '2', '1', xl('2026-01-01'), 22, null, null],
+      ['A1', '1', '1', xl('2026-01-05'), 20.5, null, null],
+    ],
+    Mice: [
+      ['Animal ID', 'Group', 'Status', 'End date'],
+      ['A1', 'Drug', 'alive', null], ['A2', 'Drug', 'euthanized', xl('2026-01-02')], ['B1', 'Vehicle', 'alive', null],
+    ],
+    Injections: [
+      ['Animal ID', 'Group', 'Cage ID', 'Tail mark', 'Date', 'Drug', 'Volume (µL)', 'Dose', 'Notes'],
+      ['A1', 'Drug', 1, 1, xl('2026-01-02'), 'X', 100, '1 mg/kg', null],
+      ['A2', 'Drug', 1, 2, xl('2026-01-02'), 'X', 100, '1 mg/kg', null],
+      ['B1', 'Vehicle', 2, 1, '2026-01-02', 'PBS', 100, null, 'late'],
+      ['A1', 'Drug', 1, 1, xl('2026-01-06'), 'X', 100, '1 mg/kg', null], // after the last session
+      ['A2', 'Drug', 1, 2, xl('2026-01-06'), 'X', 100, '1 mg/kg', null], // after A2's end
+      ['A1', 'Drug', 1, 1, xl('2026-01-06'), 'X', 100, '1 mg/kg', null], // twice
+      ['B1', null, null, null, xl('2026-01-06'), null, 100, '1 mg/kg', null], // no drug
+      ['Z9', null, null, null, xl('2026-01-06'), 'X', null, null, null], // unknown mouse
+      [null, '', '', '', null, null, 0, '', null], // formula-only row: silent
+    ],
+  };
+  const p = parseWorkbook(sheets);
+  assert.deepEqual(p.injections.map(i => `${i.id}@${i.date}:${i.drug}`), ['A1@2026-01-02:X', 'A2@2026-01-02:X', 'B1@2026-01-02:PBS', 'A1@2026-01-06:X']);
+  assert.deepEqual(p.injections[0], { id: 'A1', date: '2026-01-02', drug: 'X', dose: '1 mg/kg', volume: '100', route: '' });
+  assert.equal(p.injections[2].note, 'late');
+  assert.deepEqual(p.warnings.map(w => w.where), ['Injections row 6', 'Injections row 7', 'Injections row 8', 'Injections']);
+  const d = derive(p);
+  assert.deepEqual(d.injectionDates, ['2026-01-02', '2026-01-06']);
+  const g = applyGroups(d, studyGrouping(d));
+  const doses = dosesByKey(g.mice, g.cages);
+  assert.deepEqual(doses.map(x => x.key), ['Drug', 'Vehicle']);
+  assert.deepEqual(doses[0].doses.map(z => [z.date, z.eligible, z.items.map(i => i.mice.join('+'))]),
+    [['2026-01-02', 2, ['A1+A2']], ['2026-01-06', 1, ['A1']]]);
+  assert.deepEqual(parseWorkbook({ Measurements: sheets.Measurements }).injections, []);
+  assert.equal(derive(parseNote(demo)).injectionDates.length, 0, 'notes have no injections');
+});
+
+test('doseCalendar: month grids, partial and double doses, a dose after the last session, ended mice', () => {
+  const inj = (id, date, drug) => ({ id, date, drug, dose: '1 mg', volume: '100', route: 'IP' });
+  const mouse = (id, cage, injections, endDate = null) => ({ id, cage, injections, ended: Boolean(endDate), endDate });
+  const mice = [
+    mouse('A', 'X', [inj('A', '2026-01-30', 'P'), inj('A', '2026-02-05', 'P')]),
+    mouse('B', 'X', [inj('B', '2026-01-30', 'P')], '2026-01-31'), // ended before the 02-05 dose
+    mouse('C', 'Y', [inj('C', '2026-01-30', 'P'), inj('C', '2026-01-30', 'Q')]),
+    mouse('D', 'Y', [inj('D', '2026-01-30', 'P')]),
+  ];
+  const months = doseCalendar(mice, ['X', 'Y'], ['2026-01-29', '2026-02-02']);
+  // Only weeks that touch 01-29 .. 02-05 are kept: Jan 25-31, and Feb 1-7 (a Sunday start, so no leading blanks).
+  assert.deepEqual(months.map(m => [m.key, m.year, m.month, m.weeks.length]), [['2026-01', 2026, 0, 1], ['2026-02', 2026, 1, 1]]);
+  assert.ok(months.every(m => m.weeks.every(w => w.length === 7)));
+  const cells = months.flatMap(m => m.weeks.flat());
+  const at = date => cells.find(c => c && c.date === date);
+  assert.deepEqual(months[0].weeks[0].map(c => c && c.date.slice(8)), ['25', '26', '27', '28', '29', '30', '31']);
+  assert.equal(months[1].weeks[0][0].date, '2026-02-01');
+  assert.equal(months[1].weeks[0][6].date, '2026-02-07');
+  assert.equal(at('2026-01-30'), months[0].weeks[0][5], 'the 30th is a Friday (column 5)');
+  // January 2026 starts on a Thursday: a week kept in the middle of a month still pads the other month with nulls.
+  const mid = doseCalendar([mouse('F', 'Z', [inj('F', '2026-01-02', 'P')])], ['Z'], ['2026-01-02']);
+  assert.deepEqual(mid[0].weeks[0].map(c => c && c.date.slice(8)), [null, null, null, null, '01', '02', '03']);
+  // Range, measurement days and study days.
+  assert.equal(at('2026-01-25').inRange, false);
+  assert.equal(at('2026-01-29').inRange, true);
+  assert.equal(at('2026-02-05').inRange, true, 'the span runs to the last dose, after the last session');
+  assert.equal(at('2026-02-06').inRange, false);
+  assert.deepEqual(['2026-01-29', '2026-01-30', '2026-02-02', '2026-02-05'].map(x => at(x).measured), [true, false, true, false]);
+  assert.deepEqual(['2026-01-29', '2026-01-30', '2026-02-05'].map(x => at(x).day), [0, 1, 7]);
+  // The 30th: cage X gets P (2 of 2), cage Y gets P (2 of 2) and Q (1 of 2, partial) on the same day.
+  assert.deepEqual(at('2026-01-30').items.map(i => [i.key, i.drug, i.n, i.eligible, i.mice.join('+')]),
+    [['X', 'P', 2, 2, 'A+B'], ['Y', 'P', 2, 2, 'C+D'], ['Y', 'Q', 1, 2, 'C']]);
+  // B had ended: only A was eligible on 02-05, so A's dose is a full one.
+  assert.deepEqual(at('2026-02-05').items.map(i => [i.key, i.n, i.eligible]), [['X', 1, 1]]);
+  assert.equal(at('2026-02-02').items.length, 0);
+  assert.deepEqual(at('2026-01-30').items[0], { key: 'X', drug: 'P', dose: '1 mg', volume: '100', route: 'IP', n: 2, eligible: 2, mice: ['A', 'B'] });
+  // A hidden group leaves the calendar; no sessions and no doses give no months; an injection alone still makes one.
+  assert.deepEqual(doseCalendar(mice, ['Y'], ['2026-01-29']).flatMap(m => m.weeks.flat()).filter(c => c && c.items.length).map(c => c.date), ['2026-01-30']);
+  assert.deepEqual(doseCalendar([], [], []), []);
+  const lone = doseCalendar(mice, ['X'], []);
+  assert.equal(lone.length, 2);
+  assert.equal(lone[0].weeks.flat().find(c => c && c.date === '2026-01-30').day, null);
+  // A study that crosses a year boundary.
+  const ny = doseCalendar([mouse('E', 'Z', [inj('E', '2027-01-02', 'P')])], ['Z'], ['2026-12-28']);
+  assert.deepEqual(ny.map(m => m.key), ['2026-12', '2027-01']);
 });
 
 test('survival: endpoints are events, end of study and removed are censored', () => {

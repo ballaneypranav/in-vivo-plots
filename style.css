@@ -200,6 +200,7 @@ main { display: grid; gap: 16px; padding-top: 12px; }
   padding: 1px 8px; border-radius: 999px; font-size: 0.8rem;
   border: 1px solid var(--axis); color: var(--ink);
 }
+.flags-summary .flag { white-space: normal; max-width: 100%; border-radius: 12px; } /* the long "ended (…)" pill must wrap on a phone */
 .flag.warning { border-color: var(--warning); background: var(--warning-wash); }
 .flag.critical { border-color: var(--critical); background: var(--critical-wash); }
 .flag.missing { color: var(--ink-2); }
@@ -237,6 +238,48 @@ tr.focused th { background: var(--accent-wash); box-shadow: inset 4px 0 0 var(--
 .heat td.moved { box-shadow: inset 3px 0 0 var(--ink-2); }
 .heat td.after-end { background: repeating-linear-gradient(135deg, transparent 0 4px, var(--grid) 4px 5px); }
 .heat tbody tr[data-mouse]:hover td { outline: 1px solid var(--axis); outline-offset: -1px; }
+.doses td { min-width: 72px; }
+
+/* Injection calendar: month grids. On a phone the cells hold colored dots and an agenda lists the doses;
+   from 700px the cells hold a chip per dose (drug, group or cage, mice given / in group). */
+.card .table-wrap.cal-wrap { max-height: none; }
+.cal-month + .cal-month { margin-top: 14px; }
+.cal-month h3 { margin: 4px 4px 6px; font-size: 0.95rem; }
+.cal-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 1px; background: var(--grid); border: 1px solid var(--grid); }
+.cal-dow { background: var(--surface); color: var(--ink-2); font-size: 0.75rem; font-weight: 600; text-align: center; padding: 4px 0; }
+.cal-cell { background: var(--surface); min-height: 52px; padding: 3px 4px; min-width: 0; overflow: hidden; }
+.cal-cell.blank { background: var(--page); }
+.cal-cell.out { background: var(--page); color: var(--muted); }
+.cal-top { display: flex; align-items: baseline; gap: 4px; }
+.cal-num { font-weight: 600; font-size: 0.85rem; font-variant-numeric: tabular-nums; }
+.cal-sub { display: none; color: var(--muted); font-size: 0.7rem; }
+.cal-meas { margin-left: auto; color: var(--ink-2); font-size: 0.65rem; line-height: 1; }
+.cal-cell.today .cal-num { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
+.cal-cell.has-focus { box-shadow: inset 0 0 0 2px var(--accent); }
+.cal-item { display: none; }
+.cal-dots { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 4px; }
+.cal-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--c); flex: none; }
+.cal-dot.partial { background: transparent; box-shadow: inset 0 0 0 1.5px var(--c); }
+.cal-agenda { list-style: none; margin: 8px 4px 0; padding: 0; font-size: 0.85rem; }
+.cal-agenda > li + li { margin-top: 6px; }
+.cal-agenda ul { list-style: none; margin: 2px 0 0; padding: 0; color: var(--ink-2); }
+.cal-agenda ul .cal-dot { display: inline-block; margin-right: 6px; }
+@media (min-width: 700px) {
+  .cal-cell { min-height: 96px; padding: 4px 6px; }
+  .cal-num { font-size: 0.9rem; }
+  .cal-sub { display: inline; }
+  .cal-item {
+    display: block; margin-top: 3px; padding: 1px 5px; font-size: 0.75rem; line-height: 1.3; color: var(--ink);
+    border-left: 3px solid var(--c); border-radius: 3px; cursor: help;
+    background: color-mix(in oklab, var(--c) 22%, var(--surface));
+  }
+  .cal-item.partial { background: transparent; border: 1px dashed var(--c); border-left-width: 3px; }
+  .cal-item.mine { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .cal-drug { font-weight: 600; }
+  .cal-key { color: var(--ink-2); }
+  .cal-n { font-variant-numeric: tabular-nums; color: var(--ink-2); }
+  .cal-dots, .cal-agenda { display: none; }
+}
 
 footer { color: var(--muted); font-size: 0.8rem; text-align: center; padding: 24px 0 0; }
 
@@ -351,6 +394,7 @@ body.panel-open::before { content: ""; position: fixed; inset: 0; background: va
   #weight-group { grid-area: wg; } #weight-mice { grid-area: wi; } #weight-latest { grid-area: wl; }
   #tumor-group { grid-area: tg; } #tumor-mice { grid-area: ti; } #tumor-latest { grid-area: tl; }
   #table { grid-area: tab; } #grid { grid-area: grid; }
+  #doses, #dose-calendar { grid-column: 1 / -1; }
 }
 @media (min-width: 1000px) {
   .group-panel {
@@ -378,7 +422,7 @@ body.panel-open::before { content: ""; position: fixed; inset: 0; background: va
   body.panel-open::before { display: none; }
   #views { display: grid; grid-template-columns: 1fr 1fr; grid-template-areas: none; gap: 8px; }
   #views > section { grid-area: auto; break-inside: avoid; }
-  #table, #grid { grid-column: 1 / -1; }
+  #table, #grid, #doses, #dose-calendar { grid-column: 1 / -1; }
   .card .table-wrap { max-height: none; overflow: visible; }
   #views { grid-template-rows: none; }
   .chart, .chart-card .chart { height: 260px; flex: none; }

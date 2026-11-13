@@ -32,6 +32,14 @@ A mouse is its **Mouse ID** (the aTune ID). Cage and tail mark are attributes of
 |---|---|---|---|---|---|---|
 | 1234567 | F | Vehicle | euthanized | 2026-11-12 | weight loss | |
 
+**Injections** sheet (optional), one row per mouse per dose:
+
+| Mouse ID | Date | Drug | Dose | Volume (µL) | Route | Notes |
+|---|---|---|---|---|---|---|
+| 1234567 | 2026-11-09 | IVIG | 1.5g/kg | 300 | IP | |
+
+Other columns (the study workbook also has `Group`, `Cage ID` and `Tail mark` there, filled by formulas) are ignored: a mouse's group comes from the Mice sheet. `Dose`, `Volume (µL)` and `Route` are optional free text.
+
 **Locations** sheet (optional; the app ignores it, Excel formulas use it), kept by hand: `Animal ID` in column A, then one column per date a placement takes effect, cells `Cage-Tail mark` as text (e.g. `20184-2`). Each date column is where every mouse is from that date on; on a move day the user copies the last column, dates it and edits the mice that moved; a mouse's cell is blank once it has ended. With it:
 - Measurements' `Mouse ID` is an Excel calculated column: the newest Locations column dated on or before the row's date, matched on `Cage-Tail mark`; empty (and red) when nobody is there. So in the lab only cage and tail mark are written down.
 - The Mice sheet's `Current cage` and `Current tail mark` are formulas (last filled Locations cell).
@@ -41,8 +49,9 @@ A mouse is its **Mouse ID** (the aTune ID). Cage and tail mark are attributes of
 Parsing rules (`parseWorkbook`, given `{ sheetName: rows }` from SheetJS so it runs in Node):
 - The Measurements sheet is the one named `Measurements` whose header has `Date` and `Mouse ID`, else the first sheet with those; the Mice sheet likewise by `Mouse ID` and `Status`. Other sheets are ignored. The header is the first non-empty row; columns are matched by name (case and punctuation ignored, any order). Aliases: `Animal ID` = `Mouse ID`, `Cage ID` (or `Cage No.`) = `Cage`. Unknown columns, such as `Current cage` and `Current tail mark` on the Mice sheet, are ignored.
 - `Date` / `End date`: an Excel date (serial number) or `YYYY-MM-DD` text. Empty measurement cells = not measured (`null`).
+- The Injections sheet is the one named `Injections` (or `Dosing`, `Doses`) whose header has `Date`, `Mouse ID` and `Drug`, else the first other sheet with those three. A row with no date, mouse or drug is skipped silently (formulas fill the other columns down the table). Injection dates need not be measurement dates.
 - `Status` is `alive` (or empty), `euthanized`, `found dead` or `removed`; anything but alive, or an end date, means the mouse has ended. Without an end date, its last measurement is used. Rows after the end date are ignored.
-- Warnings (shown with sheet and row): bad dates or numbers, rows without a Mouse ID, a mouse listed twice on one date, two mice in the same cage and tail mark on one date, one tumor side only, measured mice missing from the Mice sheet, rows after the end date.
+- Warnings (shown with sheet and row): bad dates or numbers, rows without a Mouse ID, a mouse listed twice on one date, two mice in the same cage and tail mark on one date, one tumor side only, measured mice missing from the Mice sheet, rows after the end date; on Injections: bad dates, rows without a Mouse ID or drug, the same drug twice for a mouse on one date, injections after the mouse's end date, and mice neither measured nor on the Mice sheet.
 - When transcribing a sheet, write date, cage, tail mark and measurements; the Mouse ID formula fills itself from the Locations sheet. A red (empty) Mouse ID means a move missing from Locations: ask the user for it, never guess.
 
 ### Note (`.md`, older format, still read)
@@ -79,6 +88,7 @@ Parsing rules:
 - **Weight % change:** from the mouse's first recorded weight.
 - **Tumor volume:** `longer × shorter² / 2` using `max`/`min` of the two sides (length and breadth are sometimes swapped, e.g. 89-3 on 2026-11-05). Only when both sides are present.
 - **Groups:** by the workbook's groups (Mice sheet, in the order they first appear there; `studyGrouping`), by current cage, or by the user's own groups. The groups panel assigns mice (not cages) to any number of named groups: tick mice (all / with a tumor in the latest session / tumor volume ≥ x / by hand), then move them into a group or spread them evenly (`distribute`: rank by latest tumor volume or body weight and send each run of k mice one to each of the k groups in random order, or shuffle). Stored on the device per note name (`in-vivo-plots:groups:<name>`) as `{ groups: [{ id, label }], assign: { mouseId: groupId } }`; not in the note, so the input format is unchanged. `applyGroups` turns the derived data into the same shape keyed by group (real cage kept in `realCage`), so every view works by group. **Copy for workbook** copies Mouse ID and group in the Mice sheet's order, so planned groups can go into the workbook and sync from there.
+- **Doses:** each mouse keeps its injections; `dosesByKey` gathers them per group or cage and date (drug, dose, volume, route, which mice), with the number of mice in that group not yet ended (`eligible`), so a dose given to only some of them can be told apart.
 - **Summary per group per date:** mean ± SEM and `n` over mice with a value.
 
 ## Views
@@ -93,6 +103,10 @@ A toolbar above the charts scopes every view: group by the workbook's groups, cu
 7. Survival per group or cage (Kaplan–Meier, stepped), with at-risk counts in the tooltip.
 8. Latest-values table per mouse: current cage · tail mark, weight, % change, tumor volume, relative volume, sortable. Flag loss ≥ 15% (warning) and ≥ 20% (alert), ended mice (status, date, study day, reason), and mice with data earlier but none in the latest session that have not ended (in the current data: 86-5 after 2026-10-28, 87-5 after 2026-10-31).
 9. Heat map of every mouse × session for one measure, values printed in the cells; a bar on the cell where a mouse moved, hatching after its end.
+10. Injections (when the workbook has them): every mouse × injection day, the drug in each cell tinted by group or cage, dose and volume in the tooltip; CSV is one row per dose.
+11. Injection calendar (same condition, placed before view 10): month grids (Sunday first) from the first session or dose to the last, leaving out weeks wholly outside that span (`doseCalendar`, UTC date math, built on `dosesByKey`). Each day shows the date (or study day with x = study day), ● on session days, and a chip per group or cage and drug in the group's color: drug, group or cage, and mice given / mice in it, dashed when only some got it (as the hollow ▲ of the dose strip); the tooltip has dose, volume, route and mouse IDs. Follows the shown groups or cages; a highlighted mouse outlines its doses. Under 700 px the cells hold colored dots and a per-month agenda lists the doses (no hover on touch). CSV is one row per day × group or cage × drug.
+
+On the time charts (views 1, 2, 4, 5, 7), a dose strip between the plot and the x axis has one lane per shown group or cage that was dosed: ▲ in its color on each dose date, filled when every mouse in it got the dose, hollow when only some did. Hovering or tapping the strip shows the date and what each lane got. The x axis widens to take doses outside the measurement dates.
 
 Tools: per-chart PNG (3×, with title and source line), copy image, CSV, full screen; tables copy as TSV; whole-dashboard PNG, tidy CSV of all data, print.
 
