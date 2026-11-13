@@ -32,12 +32,18 @@ A mouse is its **Mouse ID** (the aTune ID). Cage and tail mark are attributes of
 |---|---|---|---|---|---|---|
 | 1234567 | F | Vehicle | euthanized | 2026-11-12 | weight loss | |
 
+**Locations** sheet (optional; the app ignores it, Excel formulas use it), kept by hand: `Animal ID` in column A, then one column per date a placement takes effect, cells `Cage-Tail mark` as text (e.g. `20184-2`). Each date column is where every mouse is from that date on; on a move day the user copies the last column, dates it and edits the mice that moved; a mouse's cell is blank once it has ended. With it:
+- Measurements' `Mouse ID` is an Excel calculated column: the newest Locations column dated on or before the row's date, matched on `Cage-Tail mark`; empty (and red) when nobody is there. So in the lab only cage and tail mark are written down.
+- The Mice sheet's `Current cage` and `Current tail mark` are formulas (last filled Locations cell).
+- Excel stores the formula results in the file, which is what the app reads, so a workbook edited by a tool that does not recalculate (not Excel) can carry stale IDs.
+- Added to the study workbook by a one-off Excel script on 2026-11-07; `tools/build-workbook.ps1` does not make it yet.
+
 Parsing rules (`parseWorkbook`, given `{ sheetName: rows }` from SheetJS so it runs in Node):
-- The Measurements sheet is the one named `Measurements` whose header has `Date` and `Mouse ID`, else the first sheet with those; the Mice sheet likewise by `Mouse ID` and `Status`. Other sheets are ignored. The header is the first non-empty row; columns are matched by name (case and punctuation ignored, any order). Aliases: `Animal ID` = `Mouse ID`, `Cage ID` (or `Cage No.`) = `Cage`. Unknown columns, such as `Cage ID` and `Tail mark` on the Mice sheet, are ignored.
+- The Measurements sheet is the one named `Measurements` whose header has `Date` and `Mouse ID`, else the first sheet with those; the Mice sheet likewise by `Mouse ID` and `Status`. Other sheets are ignored. The header is the first non-empty row; columns are matched by name (case and punctuation ignored, any order). Aliases: `Animal ID` = `Mouse ID`, `Cage ID` (or `Cage No.`) = `Cage`. Unknown columns, such as `Current cage` and `Current tail mark` on the Mice sheet, are ignored.
 - `Date` / `End date`: an Excel date (serial number) or `YYYY-MM-DD` text. Empty measurement cells = not measured (`null`).
 - `Status` is `alive` (or empty), `euthanized`, `found dead` or `removed`; anything but alive, or an end date, means the mouse has ended. Without an end date, its last measurement is used. Rows after the end date are ignored.
 - Warnings (shown with sheet and row): bad dates or numbers, rows without a Mouse ID, a mouse listed twice on one date, two mice in the same cage and tail mark on one date, one tumor side only, measured mice missing from the Mice sheet, rows after the end date.
-- When transcribing a sheet, match each (cage, tail mark) to the previous session to find the Mouse ID; a pair that is new (after a move) needs the mapping from the user.
+- When transcribing a sheet, write date, cage, tail mark and measurements; the Mouse ID formula fills itself from the Locations sheet. A red (empty) Mouse ID means a move missing from Locations: ask the user for it, never guess.
 
 ### Note (`.md`, older format, still read)
 Example: `private/Mouse Study 001-2026-11.md`.

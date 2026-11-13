@@ -26,8 +26,9 @@ Rows the app can't read are listed under the header, with the sheet and row (wor
 
 - **Measurements**: `Date`, `Cage`, `Tail mark`, `Mouse ID`, `Weight (g)`, `Tumor Length`, `Tumor Breadth`, `Notes`, one row per mouse per session. Cage and tail mark are where the mouse was that day.
 - **Mice**: `Mouse ID`, `Sex`, `Group`, `Status` (`alive`, `euthanized`, `found dead`, `removed`), `End date`, `End reason`, `Notes`, one row per mouse.
+- **Locations** (optional, used by Excel, not read by the app): `Animal ID`, then one column per date mice were placed or moved, each cell `Cage-Tail mark` (e.g. `20184-2`), meaning where the mouse is from that date on. Fill it in by hand on move days (copy the last column, date it, change the mice that moved). The Measurements `Mouse ID` column is then a formula that finds the mouse from date, cage and tail mark, so in the lab you only write down cage and tail mark; a red, empty ID means nobody is at that place on Locations.
 
-Columns are matched by name, in any order. `Animal ID` is read as `Mouse ID` and `Cage ID` as `Cage`; other columns (such as `Cage ID` or `Tail mark` on the Mice sheet) are ignored. An empty cell means "not measured". See `PLAN.md` → *Input format*; the same contract is documented in the Obsidian vault (`02 Notes/In-vivo Plots.md`). The older note format (one `## YYYY-MM-DD` heading and table per session) is still read.
+Columns are matched by name, in any order. `Animal ID` is read as `Mouse ID` and `Cage ID` as `Cage`; other columns (such as `Current cage` or `Current tail mark` on the Mice sheet) are ignored. An empty cell means "not measured". See `PLAN.md` → *Input format*; the same contract is documented in the Obsidian vault (`02 Notes/In-vivo Plots.md`). The older note format (one `## YYYY-MM-DD` heading and table per session) is still read.
 
 ## Develop
 
