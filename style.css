@@ -91,8 +91,14 @@ body {
   color: var(--ink);
 }
 
-header { padding: 20px 0 8px; }
+header { position: relative; padding: 20px 0 8px; }
 h1 { font-size: 1.4rem; margin: 0 0 12px; }
+/* App version, top right, on the title's line. */
+.version {
+  position: absolute; top: 20px; right: 0;
+  line-height: calc(1.4rem * 1.45);
+  font-size: 0.75rem; color: var(--muted); font-variant-numeric: tabular-nums;
+}
 .actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .button {
   display: inline-flex; align-items: center; justify-content: center;
@@ -389,7 +395,8 @@ body.panel-open::before { content: ""; position: fixed; inset: 0; background: va
 @media (min-width: 1000px) {
   body { max-width: none; padding: 0 20px 16px; }
   header { padding: 12px 0 0; }
-  .masthead { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; }
+  .masthead { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; padding-right: 96px; }
+  .version { top: 12px; line-height: 36px; }
   h1 { margin: 0; font-size: 1.25rem; }
   .button { min-height: 36px; padding: 0 14px; }
   #status { margin: 0; flex: 1 1 180px; min-width: 0; font-size: 0.85rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
