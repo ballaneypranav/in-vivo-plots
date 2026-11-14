@@ -278,6 +278,7 @@ test('workbook: problems are reported with sheet and row', () => {
       [null, 'A4', '2026-03-01', 'n/a', 1, 1], // bad number, same spot as A1
       [null, 'A5', '2026-03-01', 20, 2, 1, 3, null], // one tumor side
       [null, 'A6', '2026-03-09', 20, 2, 2], // after its end date
+      [null, 'A6', '2026-03-01', 22, 2, 2],
     ],
     Mice: [MICE_HEAD, ['A1', '', '', 'alive'], ['A6', '', '', 'found dead', '2026-03-05'], ['A7', '', '', 'gone']],
   };
@@ -290,6 +291,10 @@ test('workbook: problems are reported with sheet and row', () => {
   assert.ok(p.warnings.some(w => w.where === 'Data row 6' && /"n\/a" is not a number/.test(w.message)));
   assert.ok(p.warnings.some(w => w.where === 'Data row 7' && /only one tumor side/.test(w.message)));
   assert.ok(p.warnings.some(w => w.where === 'Data row 8' && /ended on 2026-03-05/.test(w.message)));
+  const dd = derive(p);
+  assert.deepEqual(dd.mice.find(m => m.id === 'A6').points.map(x => [x.date, x.weight]), [['2026-03-01', 22], ['2026-03-09', null]]);
+  assert.deepEqual(dd.groups.find(g => g.cage === '2').weight.map(x => [x.date, x.n]), [['2026-03-01', 2], ['2026-03-09', 0]],
+    'nothing after the end date reaches the plots or group means');
   assert.ok(p.warnings.some(w => w.where === 'Mice' && /A4, A5/.test(w.message)), 'measured mice missing from the Mice sheet');
   assert.ok(p.warnings.some(w => /A7 is gone but has no end date/.test(w.message)));
   assert.deepEqual(parseWorkbook({ Sheet1: [['a', 'b']] }).sessions, []);
@@ -486,12 +491,22 @@ test('workbook: Groups sheet treatment start, days from start and values from st
   assert.deepEqual(g.cages, ['Drug', 'vehicle', 'Late', UNGROUPED]);
   close(g.groups.find(x => x.cage === 'Drug').pct[3].mean, 10);
 
-  // Means by day from start: a cage mixing two starts gets a point per day of either.
+  // Group means by date count a mouse from its baseline session before its start (a group's start counts too):
+  // A1 from 01-03 (weighed on its start day), A2 from 01-01 (its last weight before the start), B1 from 01-05.
+  const byDate = applyGroups(d, studyGrouping(d)).groups;
+  const ns = (cage, metric) => byDate.find(x => x.cage === cage)[metric].map(x => x.n);
+  assert.deepEqual(ns('Drug', 'weight'), [1, 1, 1, 1]);
+  assert.deepEqual(ns('Drug', 'volume'), [0, 1, 1, 1], 'A1 not yet enrolled on 01-01');
+  assert.deepEqual(ns('vehicle', 'weight'), [0, 0, 1, 1]);
+  assert.equal(byDate.find(x => x.cage === 'vehicle').weight[0].mean, null);
+  assert.deepEqual(ns('Late', 'weight'), [1, 0, 0, 1], 'no start: counted throughout');
+
+  // Means by day from start: a cage mixing two starts gets a point per day of either; days before each baseline are left out.
   const mixed = summarizeByTreatDay([byId('A1'), byId('B1'), byId('C1')], 'weight');
   assert.deepEqual(mixed.map(b => [b.day, b.n, b.dates]), [
-    [-4, 1, ['2026-01-01']], [-2, 2, ['2026-01-01', '2026-01-03']], [0, 2, ['2026-01-03', '2026-01-05']], [2, 1, ['2026-01-07']], [4, 1, ['2026-01-07']],
+    [0, 2, ['2026-01-03', '2026-01-05']], [2, 1, ['2026-01-07']], [4, 1, ['2026-01-07']],
   ]);
-  close(mixed[2].mean, 21);
+  close(mixed[0].mean, 21);
 
   // Survival from start: A2's endpoint is on day 2 of treatment, A1 is censored on day 4.
   const [drug, vehicle, late] = survivalFromStart(g.mice, g.cages, d.latestDate);
@@ -590,10 +605,14 @@ test('workbook: staggered starts, Regimens schedule, measurement cadence, binnin
   assert.deepEqual(drug.map(m => m.id).sort(), ['S1', 'S2', 'S3', 'S4', 'U1']);
   const binned = summarizeByTreatDay(drug, 'weight', 2);
   assert.deepEqual(binned.filter(b => b.n).map(b => [b.day, b.n, b.tdays]), [
-    [-2, 1, [-3]], [0, 3, [-1, 0]], [2, 4, [1, 2]], [4, 3, [3, 4]], [6, 2, [5, 6]], [8, 2, [7, 8]],
-  ]);
+    [0, 3, [-1, 0]], [2, 4, [1, 2]], [4, 3, [3, 4]], [6, 2, [5, 6]], [8, 2, [7, 8]],
+  ]); // S3's day −3 is before its baseline (day −1); S2's day −1 is its baseline, so kept
   assert.equal(binned.find(b => b.day === 2).mean, 20, 'S1 counts with day 2, not its extra day-1 weight');
-  assert.equal(summarizeByTreatDay(drug, 'weight').filter(b => b.n).length, 11, 'exact days by default: −3, −1 and 0 to 8');
+  assert.equal(summarizeByTreatDay(drug, 'weight').filter(b => b.n).length, 10, 'exact days by default: −1 and 0 to 8');
+  // By date, a staggered mouse joins the group mean at its baseline session; U1 (no start) counts throughout.
+  assert.deepEqual(grouped.groups.find(x => x.cage === 'Drug').weight.map(x => [x.date, x.n]), [
+    ['2026-02-01', 3], ['2026-02-02', 1], ['2026-02-03', 4], ['2026-02-05', 4], ['2026-02-07', 4], ['2026-02-09', 4],
+  ]);
 
   // Mice not yet enrolled, or enrolled after a day, are not expected to have had that dose.
   const [drugDoses] = dosesByKey(drug, ['Drug']).map(l => l.doses);

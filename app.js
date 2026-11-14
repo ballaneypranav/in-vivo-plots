@@ -593,9 +593,14 @@ function derive(parsed, opts = {}) {
     for (const p of m.points) p.rtv = p.volume !== null && m.firstVolume ? p.volume / m.firstVolume : null;
     // From the treatment start: the last value on or before it is the baseline.
     const before = m.start ? m.points.filter(p => p.date <= m.start) : [];
-    const lastOf = f => { const p = [...before].reverse().find(x => x[f] !== null); return p ? p[f] : null; };
-    m.startWeight = lastOf('weight');
-    m.startVolume = lastOf('volume');
+    const lastWith = f => [...before].reverse().find(x => x[f] !== null) || null;
+    const wBase = lastWith('weight'), vBase = lastWith('volume');
+    m.startWeight = wBase ? wBase.weight : null;
+    m.startVolume = vBase ? vBase.volume : null;
+    // Group means count the mouse from its baseline session (the earlier of its weight and volume baselines), else
+    // from its start; mice with no start count throughout.
+    const bases = [wBase, vBase].filter(Boolean).map(p => p.date).sort();
+    m.inGroupFrom = m.start ? bases[0] || m.start : null;
     for (const p of m.points) {
       p.tday = m.start ? daysBetween(m.start, p.date) : null;
       p.pctStart = p.weight !== null && m.startWeight ? ((p.weight - m.startWeight) / m.startWeight) * 100 : null;
@@ -711,7 +716,7 @@ function rebase(d) {
 }
 
 /**
- * Mean ± SEM of `metric` per day from treatment start, over the mice that have a start:
+ * Mean ± SEM of `metric` per day from treatment start, over the mice that have a start, each from its baseline session on (`inGroup`):
  * [{ day, mean, sem, n, dates, tdays }] by day, `dates` being the calendar dates and `tdays` the days from start that
  * went into it. With `bin` > 1 (the measurement cadence) days are grouped in steps of `bin`, rounding up (bin 2:
  * day 0 holds days −1 and 0, day 2 holds 1 and 2), so mice with different starts measured on the same calendar days
@@ -724,6 +729,7 @@ function summarizeByTreatDay(members, metric, bin = 1) {
     if (!m.start) continue;
     const mine = new Map(); // step -> the point that counts, or null when none has a value
     for (const p of m.points) {
+      if (!inGroup(m, p.date)) continue;
       const s = step(p.tday);
       const best = mine.get(s);
       if (p[metric] === null) { if (best === undefined) mine.set(s, null); continue; }
@@ -802,11 +808,17 @@ function survivalFromStart(mice, keys, latestDate) {
   });
 }
 
-/** Per-group mean ± SEM of every metric at every session. `keys` are the values of m.cage, in display order. */
+/** Whether a mouse counts in its group's means on `date`: from its baseline session before treatment (`inGroupFrom`) on. */
+const inGroup = (m, date) => !m.inGroupFrom || date >= m.inGroupFrom;
+
+/**
+ * Per-group mean ± SEM of every metric at every session. `keys` are the values of m.cage, in display order.
+ * A mouse with a treatment start counts only from its baseline session (`inGroup`), so mice not yet enrolled are left out.
+ */
 function summarizeGroups(mice, keys, dates) {
   return keys.map(cage => {
     const members = mice.filter(m => m.cage === cage);
-    const series = metric => dates.map((date, k) => ({ date, ...summarize(members.map(m => m.points[k][metric])) }));
+    const series = metric => dates.map((date, k) => ({ date, ...summarize(members.filter(m => inGroup(m, date)).map(m => m.points[k][metric])) }));
     return {
       cage, mice: members.map(m => m.id),
       pct: series('pct'), weight: series('weight'), volume: series('volume'), rtv: series('rtv'),
