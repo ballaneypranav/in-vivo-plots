@@ -1,7 +1,7 @@
 // Turn an experiment note (Markdown) into the rows of a study workbook, as JSON for build-workbook.ps1.
 //   node tools/note-to-workbook.js "note.md" > rows.json    one-off migration; Mouse ID = cage-mouse (a placeholder)
 //   node tools/note-to-workbook.js --demo > rows.json       the synthetic demo, with groups, cage moves and ended mice
-// Output: { about?, mice: [{ id, sex, group, status, endDate, endReason, notes }],
+// Output: { about?, mice: [{ id, sex, group, status, endDate, endReason, notes, start? }],
 //           measurements: [{ date, cage, mark, id, weight, length, breadth, notes }] }
 'use strict';
 const fs = require('node:fs');

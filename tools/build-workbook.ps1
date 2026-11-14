@@ -2,7 +2,8 @@
 # Windows with Excel only. Usage:
 #   powershell -File tools/build-workbook.ps1 -Json rows.json -Out "C:\path\Study Data.xlsx"
 # Sheets: Measurements (one row per mouse per session) and Mice (one row per mouse), each an Excel table,
-# with dropdowns for Status, End reason and the Mouse ID of a measurement. -Out must be an absolute path.
+# with dropdowns for Status, End reason and the Mouse ID of a measurement; Mice ends with an empty Treatment start
+# column (a mouse's own start). -Out must be an absolute path. To add the schedule sheets to a study workbook, see add-schedule.ps1.
 param(
   [Parameter(Mandatory = $true)][string]$Json,
   [Parameter(Mandatory = $true)][string]$Out
@@ -77,7 +78,8 @@ try {
     @{ head = 'Status'; key = 'status' },
     @{ head = 'End date'; key = 'endDate'; format = 'date' },
     @{ head = 'End reason'; key = 'endReason' },
-    @{ head = 'Notes'; key = 'notes' }
+    @{ head = 'Notes'; key = 'notes' },
+    @{ head = 'Treatment start'; key = 'start'; format = 'date' }
   )
   $miceTable = Write-Table $mi 'Mice' $miceCols @($data.mice)
   Add-List $miceTable.ListColumns.Item(4).DataBodyRange 'alive,euthanized,found dead,removed' 1

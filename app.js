@@ -150,14 +150,26 @@ const MEASURE_COLUMNS = {
   weightg: 'weight', bodyweightg: 'weight', bodyweight: 'weight', weight: 'weight',
   tumorlength: 'length', tumorbreadth: 'breadth', notes: 'note', note: 'note',
 };
+// `Treatment start` on Mice is the mouse's own start (staggered enrollment); blank means its group's start.
+// A helper column such as `Start used` (an Excel formula) is not matched, so it is ignored.
 const MICE_COLUMNS = {
   mouseid: 'id', animalid: 'id', sex: 'sex', group: 'group', status: 'status', enddate: 'endDate', endreason: 'endReason', notes: 'notes', note: 'notes',
+  treatmentstart: 'start', treatmentstartdate: 'start', startdate: 'start',
 };
+// The Regimens sheet: one line per drug a group gets, with `Days` (from each mouse's treatment start) to dose on.
+const REGIMEN_COLUMNS = {
+  group: 'group', drug: 'drug', treatment: 'drug', dose: 'dose', volumel: 'volume', volumeul: 'volume', volume: 'volume', route: 'route',
+  days: 'days', daysfromstart: 'days', schedule: 'days',
+};
+// Labels of the measurement cadence cells on the Groups sheet; the value is the next filled cell to the right.
+const CADENCE_LABELS = { measureevery: 'every', measureeverydays: 'every', measurefrom: 'from' };
 // `Volume (µL)` normalizes to `volumel` (µ is dropped). Group, Cage and Tail mark are ignored: a mouse's group comes from Mice.
 const INJECTION_COLUMNS = {
   date: 'date', mouseid: 'id', animalid: 'id', drug: 'drug', treatment: 'drug', dose: 'dose',
   volumel: 'volume', volumeul: 'volume', volume: 'volume', route: 'route', notes: 'note', note: 'note',
 };
+// The Groups sheet: one row per group. Only the treatment start is read; Color, Mice, Drugs and the rest are ignored.
+const GROUP_COLUMNS = { group: 'group', treatmentstart: 'treat', treatmentstartdate: 'treat', startdate: 'treat', start: 'treat' };
 const STATUSES = ['alive', 'euthanized', 'found dead', 'removed'];
 const EXCEL_EPOCH = Date.UTC(1899, 11, 30);
 
@@ -203,7 +215,8 @@ function pickSheet(sheets, nameRe, map, required) {
  * Parse a study workbook given as { sheetName: rows }.
  * Returns { sessions: [{ date, rows: [{ id, cage, mark, weight, length, breadth, note? }] }],
  *           mice: [{ id, sex, group, status, endDate, endReason, notes }],
- *           injections: [{ id, date, drug, dose, volume, route, note? }], warnings: [{ where, message }] }.
+ *           injections: [{ id, date, drug, dose, volume, route, note? }], groups: [{ group, start }],
+ *           warnings: [{ where, message }] }.
  */
 function parseWorkbook(sheets) {
   const warnings = [];
@@ -211,7 +224,7 @@ function parseWorkbook(sheets) {
   const meas = pickSheet(sheets, /^measurements?$/i, MEASURE_COLUMNS, ['date', 'id']);
   if (!meas) {
     warn('Workbook', 'No Measurements sheet: it needs a header row with at least Date and Mouse ID columns.');
-    return { sessions: [], mice: [], injections: [], warnings };
+    return { sessions: [], mice: [], injections: [], groups: [], regimens: [], cadence: null, warnings };
   }
 
   const roster = [];
@@ -239,6 +252,12 @@ function parseWorkbook(sheets) {
         status: status || (endDate ? 'ended' : 'alive'), endDate, endReason: cellText(get('endReason')), notes: cellText(get('notes')),
       };
       if (m.status !== 'alive' && !endDate) warn(where, `Mouse ${id} is ${m.status} but has no end date; its last measurement is used.`);
+      m.start = null;
+      if (cellText(get('start')) !== '') {
+        m.start = cellDate(get('start'));
+        if (!m.start) warn(where, `Mouse ${id}: treatment start "${cellText(get('start'))}" is not a date (use YYYY-MM-DD).`);
+        else if (endDate && m.start > endDate) warn(where, `Mouse ${id}: treatment start ${m.start} is after its end date ${endDate}.`);
+      }
       roster.push(m);
       rosterById.set(id, m);
     }
@@ -292,7 +311,113 @@ function parseWorkbook(sheets) {
   const sessions = [...byDate.values()].sort((a, b) => a.date.localeCompare(b.date)).map(s => ({ date: s.date, rows: s.rows }));
   const measured = new Set(sessions.flatMap(s => s.rows.map(r => r.id)));
   const injections = parseInjections(sheets, [meas.name, miceSheet && miceSheet.name], rosterById, measured, warn);
-  return { sessions, mice: roster, injections, warnings };
+  const groups = parseGroups(sheets, [meas.name, miceSheet && miceSheet.name], roster, warn);
+  const regimens = parseRegimens(sheets, [meas.name, miceSheet && miceSheet.name], warn);
+  const cadence = parseCadence(sheets, warn);
+  return { sessions, mice: roster, injections, groups, regimens, cadence, warnings };
+}
+
+/**
+ * The optional Regimens sheet, read when it has Group, Drug and Days columns: [{ group, drug, dose, volume, route, days }]
+ * in the sheet's order. `days` are whole days from each mouse's treatment start, written as a comma-separated list
+ * (`0` or `2, 4`); empty means the drug is not scheduled. Commas only, so Excel's formulas read the list the same way.
+ */
+function parseRegimens(sheets, skip, warn) {
+  const others = Object.fromEntries(Object.entries(sheets).filter(([n]) => !skip.includes(n)));
+  const sheet = pickSheet(others, /^regimens?$/i, REGIMEN_COLUMNS, ['group', 'drug', 'days']);
+  if (!sheet) return [];
+  const { idx, start, rows, name } = sheet;
+  const out = [];
+  for (let r = start + 1; r < rows.length; r++) {
+    const row = rows[r] || [];
+    const get = f => (idx[f] === undefined ? '' : cellText(row[idx[f]]));
+    const group = get('group');
+    const drug = get('drug');
+    const raw = get('days');
+    if (!group && !drug && !raw) continue;
+    const where = `${name} row ${r + 1}`;
+    if (!group || !drug) { if (raw) warn(where, `Days "${raw}" need both a group and a drug; ignored.`); continue; }
+    const days = [];
+    for (const token of raw.split(',').map(s => s.trim()).filter(Boolean)) {
+      if (!/^-?\d+$/.test(token)) { warn(where, `${group}, ${drug}: day "${token}" is not a whole number; ignored (separate days with commas).`); continue; }
+      const day = Number(token);
+      if (Math.abs(day) > 365) {
+        warn(where, `${group}, ${drug}: day ${day} looks wrong; ignored. If you typed a list, format the Days column as Text so Excel keeps the commas.`);
+        continue;
+      }
+      if (!days.includes(day)) days.push(day);
+    }
+    out.push({ group, drug, dose: get('dose'), volume: get('volume'), route: get('route'), days: days.sort((a, b) => a - b) });
+  }
+  return out;
+}
+
+/**
+ * The measurement cadence, from labelled cells on the sheet named Groups: `Measure every (days)` and `Measure from`
+ * (a date measurements fall on), each value in the next filled cell to the right. Returns { every, from } or null.
+ * `from` may be null; measure days are then counted from the latest session.
+ */
+function parseCadence(sheets, warn) {
+  for (const name of Object.keys(sheets).filter(n => /^groups?$/i.test(n.trim()))) {
+    const found = {};
+    (sheets[name] || []).forEach((row, r) => (row || []).forEach((cell, c) => {
+      const key = CADENCE_LABELS[norm(cell)];
+      if (!key || found[key]) return;
+      const k = row.findIndex((v, j) => j > c && cellText(v) !== '');
+      found[key] = { value: k < 0 ? '' : row[k], where: `${name} row ${r + 1}` };
+    }));
+    if (!found.every) continue;
+    const every = Number(cellText(found.every.value));
+    if (!Number.isInteger(every) || every < 1) {
+      warn(found.every.where, `Measure every "${cellText(found.every.value)}" is not a whole number of days; no measurement schedule.`);
+      return null;
+    }
+    let from = null;
+    if (found.from && cellText(found.from.value) !== '') {
+      from = cellDate(found.from.value);
+      if (!from) warn(found.from.where, `Measure from "${cellText(found.from.value)}" is not a date (use YYYY-MM-DD); counted from the latest session.`);
+    }
+    return { every, from };
+  }
+  return null;
+}
+
+/**
+ * The optional Groups sheet, read only when it has a Group and a Treatment start column: [{ group, start }] in the
+ * sheet's order, start as ISO or null when empty. A group on the Mice sheet with no start, and none of whose mice has
+ * a start of its own, is reported once.
+ */
+function parseGroups(sheets, skip, roster, warn) {
+  const others = Object.fromEntries(Object.entries(sheets).filter(([n]) => !skip.includes(n)));
+  const sheet = pickSheet(others, /^groups?$/i, GROUP_COLUMNS, ['group', 'treat']);
+  if (!sheet) return [];
+  const { idx, start, rows, name } = sheet;
+  const out = [];
+  const seen = new Set();
+  for (let r = start + 1; r < rows.length; r++) {
+    const row = rows[r] || [];
+    const get = f => (idx[f] === undefined ? '' : row[idx[f]]);
+    const group = cellText(get('group'));
+    const raw = cellText(get('treat'));
+    if (!group && !raw) continue;
+    const where = `${name} row ${r + 1}`;
+    if (!group) { warn(where, `Treatment start "${raw}" has no group; ignored.`); continue; }
+    if (seen.has(group.toLowerCase())) { warn(where, `Group ${group} is listed twice; the later row is ignored.`); continue; }
+    seen.add(group.toLowerCase());
+    let date = null;
+    if (raw) {
+      date = cellDate(get('treat'));
+      if (!date) warn(where, `Group ${group}: treatment start "${raw}" is not a date (use YYYY-MM-DD).`);
+    }
+    out.push({ group, start: date });
+  }
+  // A group with mice of their own start (staggered enrollment) needs none: report only groups where nobody has a start.
+  const dated = new Set([...out.filter(g => g.start), ...roster.filter(m => m.start)].map(g => g.group.toLowerCase()));
+  const missing = [...new Set(roster.map(m => m.group).filter(g => g && !dated.has(g.toLowerCase())))];
+  if (missing.length) {
+    warn(name, `No treatment start for ${missing.join(', ')}; ${missing.length > 1 ? 'these groups are' : 'this group is'} left out when plotting from treatment start.`);
+  }
+  return out;
 }
 
 /**
@@ -353,6 +478,7 @@ function readWorkbookSheets(lib, data) {
 const byNatural = (a, b) => a.localeCompare(b, undefined, { numeric: true });
 const DAY = 86400000;
 const ts = iso => { const [y, m, d] = iso.split('-').map(Number); return Date.UTC(y, m - 1, d); };
+const daysBetween = (from, to) => Math.round((ts(to) - ts(from)) / DAY);
 
 /** mean ± SEM (sample SD / √n) over non-null values. sem is null when n < 2; mean is null when n = 0. */
 function summarize(values) {
@@ -384,13 +510,25 @@ const LOSS_ALERT = -20;
  * is now, from its latest row, so the by-cage views put each mouse's whole history under its current cage.
  * Each point keeps the cage and tail mark of that day, and `moved` (the previous place) when they changed.
  * `parsed.mice` (the workbook's Mice sheet) adds group, status and end date; points after the end are empty.
+ *
+ * A mouse's `start` is its own Treatment start (Mice sheet), else its group's (Groups sheet). Its points then
+ * carry `tday` (days from the start, negative before it), `pctStart` (weight % change from the last weight on or
+ * before the start) and `rtvStart` (volume ÷ the last volume on or before the start); mice with no start get null.
+ *
+ * Schedule: each mouse with a start gets `planned`, one dose per Regimens day of its group's drugs (to its end date):
+ * { date, day, drug, dose, volume, route, status }, status `given` (an Injections row has that drug that day), `missed`
+ * (none, on or before `cutoff`, the later of the last session and the last injection) or `planned` (after the cutoff).
+ * `offSchedule` lists its injections of a scheduled drug on a day not planned (`reason: 'not-planned'`), or given
+ * before it has a start (`reason: 'no-start'`). The cutoff comes from the data, not the clock, so a remembered file
+ * does not grow missed doses. `opts.today` (ISO) is only kept for the views' "coming up" list.
  */
-function derive(parsed) {
+function derive(parsed, opts = {}) {
   const dates = parsed.sessions.map(s => s.date);
   const days = dates.map(date => Math.round((ts(date) - ts(dates[0])) / DAY));
   const dayOf = date => Math.round((ts(date) - ts(dates[0])) / DAY);
   const latestDate = dates[dates.length - 1] ?? null;
   const roster = new Map((parsed.mice || []).map(m => [m.id, m]));
+  const startOf = new Map((parsed.groups || []).filter(g => g.start).map(g => [g.group.toLowerCase(), g.start]));
   const miceById = new Map();
 
   for (const s of parsed.sessions) {
@@ -417,6 +555,8 @@ function derive(parsed) {
     const seen = dates.filter(d => hasData(m.byDate[d]));
     m.endDate = m.ended ? (info.endDate || seen[seen.length - 1] || rowDates[rowDates.length - 1]) : null;
     m.endDay = m.endDate ? dayOf(m.endDate) : null;
+    m.ownStart = info.start || null;
+    m.start = m.ownStart || (m.group && startOf.get(m.group.toLowerCase())) || null;
   }
 
   const injectionsOf = new Map();
@@ -451,6 +591,16 @@ function derive(parsed) {
     const firstTumor = m.points.find(p => p.volume !== null);
     m.firstVolume = firstTumor ? firstTumor.volume : null;
     for (const p of m.points) p.rtv = p.volume !== null && m.firstVolume ? p.volume / m.firstVolume : null;
+    // From the treatment start: the last value on or before it is the baseline.
+    const before = m.start ? m.points.filter(p => p.date <= m.start) : [];
+    const lastOf = f => { const p = [...before].reverse().find(x => x[f] !== null); return p ? p[f] : null; };
+    m.startWeight = lastOf('weight');
+    m.startVolume = lastOf('volume');
+    for (const p of m.points) {
+      p.tday = m.start ? daysBetween(m.start, p.date) : null;
+      p.pctStart = p.weight !== null && m.startWeight ? ((p.weight - m.startWeight) / m.startWeight) * 100 : null;
+      p.rtvStart = p.volume !== null && m.startVolume ? p.volume / m.startVolume : null;
+    }
     const seen = m.points.filter(p => p.weight !== null || p.length !== null || p.breadth !== null);
     m.lastSeen = seen.length ? seen[seen.length - 1].date : null;
     if (m.ended) {
@@ -460,6 +610,43 @@ function derive(parsed) {
     }
     delete m.byDate;
     m.injections = injectionsOf.get(m.id) || [];
+  }
+
+  // Schedule: planned doses from each mouse's start and its group's Regimens days.
+  const lastInjection = (parsed.injections || []).reduce((a, i) => (i.date > a ? i.date : a), '');
+  const cutoff = [latestDate || '', lastInjection].sort().pop() || null;
+  const regimensOf = new Map();
+  for (const r of parsed.regimens || []) {
+    if (!r.days || !r.days.length) continue;
+    const g = r.group.toLowerCase();
+    if (!regimensOf.has(g)) regimensOf.set(g, []);
+    regimensOf.get(g).push(r);
+  }
+  const same = (a, b) => a.toLowerCase() === b.toLowerCase();
+  for (const m of mice) {
+    const regs = (m.group && regimensOf.get(m.group.toLowerCase())) || [];
+    m.planned = [];
+    m.offSchedule = [];
+    if (!regs.length) continue;
+    if (m.start) {
+      const seen = new Set();
+      for (const r of regs) {
+        for (const day of r.days) {
+          const date = addDays(m.start, day);
+          const k = `${date}|${r.drug.toLowerCase()}`;
+          if ((m.endDate && date > m.endDate) || seen.has(k)) continue;
+          seen.add(k);
+          const given = m.injections.some(i => i.date === date && same(i.drug, r.drug));
+          m.planned.push({ date, day, drug: r.drug, dose: r.dose, volume: r.volume, route: r.route,
+            status: given ? 'given' : cutoff && date <= cutoff ? 'missed' : 'planned' });
+        }
+      }
+      m.planned.sort((a, b) => a.date.localeCompare(b.date) || byNatural(a.drug, b.drug));
+    }
+    const scheduled = regs.map(r => r.drug);
+    m.offSchedule = m.injections.filter(i => scheduled.some(x => same(x, i.drug)))
+      .filter(i => !m.planned.some(p => p.date === i.date && same(p.drug, i.drug)))
+      .map(i => ({ ...i, day: m.start ? daysBetween(m.start, i.date) : null, reason: m.start ? 'not-planned' : 'no-start' }));
   }
 
   const cages = [...new Set(mice.map(m => m.cage))].sort(byNatural);
@@ -477,6 +664,8 @@ function derive(parsed) {
     return {
       id: m.id, cage: m.cage, mouse: m.mouse,
       weight: p.weight ?? null, pct: p.pct ?? null, volume: p.volume ?? null, rtv: p.rtv ?? null,
+      pctStart: p.pctStart ?? null, rtvStart: p.rtvStart ?? null,
+      start: m.start, tday: m.start && latestDate ? daysBetween(m.start, latestDate) : null,
       lastSeen: m.lastSeen, flags,
       group: m.group, status: m.status, endDate: m.endDate, endDay: m.endDay, endReason: m.endReason,
     };
@@ -486,7 +675,69 @@ function derive(parsed) {
   const groupNames = [...new Set([...(parsed.mice || []).map(m => m.group), ...mice.map(m => m.group)].filter(Boolean))];
   // Every date a shown mouse was injected (they need not be measurement sessions).
   const injectionDates = [...new Set(mice.flatMap(m => m.injections.map(i => i.date)))].sort();
-  return { unit: 'cage', dates, days, latestDate, mice, cages, groups, latest, groupNames, hasRoster: roster.size > 0, injectionDates };
+  const hasStarts = mice.some(m => m.start);
+  const cadence = parsed.cadence || null;
+  const hasSchedule = regimensOf.size > 0 || Boolean(cadence);
+  return {
+    unit: 'cage', dates, days, latestDate, mice, cages, groups, latest, groupNames, hasRoster: roster.size > 0, injectionDates, hasStarts,
+    cutoff, today: opts.today || null, cadence, hasSchedule,
+  };
+}
+
+const addDays = (iso, n) => new Date(ts(iso) + n * DAY).toISOString().slice(0, 10);
+
+/**
+ * Measurement days from `from` to `to` (ISO, inclusive): every `cadence.every` days counted from `cadence.from`, else
+ * from `anchor` (the latest session). [] without a cadence.
+ */
+function measureDates(cadence, anchor, from, to) {
+  const origin = (cadence && cadence.from) || anchor;
+  if (!cadence || !origin || !from || !to || from > to) return [];
+  const out = [];
+  const k0 = Math.ceil(daysBetween(origin, from) / cadence.every);
+  for (let date = addDays(origin, k0 * cadence.every); date <= to; date = addDays(date, cadence.every)) out.push(date);
+  return out;
+}
+
+/**
+ * `derive` (or `applyGroups`) output with weight % change and relative tumor volume measured from each mouse's
+ * treatment start (`pctStart`, `rtvStart`) instead of its first measurement; mice with no start have none.
+ * Loss flags are left as they are: they stay on the first recorded weight.
+ */
+function rebase(d) {
+  const mice = d.mice.map(m => ({ ...m, points: m.points.map(p => ({ ...p, pct: p.pctStart, rtv: p.rtvStart })) }));
+  const latest = d.latest.map(r => ({ ...r, pct: r.pctStart, rtv: r.rtvStart }));
+  return { ...d, mice, latest, groups: summarizeGroups(mice, d.cages, d.dates), rebased: true };
+}
+
+/**
+ * Mean ± SEM of `metric` per day from treatment start, over the mice that have a start:
+ * [{ day, mean, sem, n, dates, tdays }] by day, `dates` being the calendar dates and `tdays` the days from start that
+ * went into it. With `bin` > 1 (the measurement cadence) days are grouped in steps of `bin`, rounding up (bin 2:
+ * day 0 holds days −1 and 0, day 2 holds 1 and 2), so mice with different starts measured on the same calendar days
+ * line up; each mouse then counts once per step, with its value nearest the step's day (the later one on a tie).
+ */
+function summarizeByTreatDay(members, metric, bin = 1) {
+  const step = t => (bin > 1 ? Math.ceil(t / bin) * bin || 0 : t);
+  const byDay = new Map();
+  for (const m of members) {
+    if (!m.start) continue;
+    const mine = new Map(); // step -> the point that counts, or null when none has a value
+    for (const p of m.points) {
+      const s = step(p.tday);
+      const best = mine.get(s);
+      if (p[metric] === null) { if (best === undefined) mine.set(s, null); continue; }
+      if (!best || Math.abs(p.tday - s) <= Math.abs(best.tday - s)) mine.set(s, p);
+    }
+    for (const [s, p] of mine) {
+      if (!byDay.has(s)) byDay.set(s, { values: [], dates: new Set(), tdays: new Set() });
+      const b = byDay.get(s);
+      b.values.push(p ? p[metric] : null);
+      if (p) { b.dates.add(p.date); b.tdays.add(p.tday); }
+    }
+  }
+  return [...byDay.entries()].sort((a, b) => a[0] - b[0])
+    .map(([day, b]) => ({ day, ...summarize(b.values), dates: [...b.dates].sort(), tdays: [...b.tdays].sort((x, y) => x - y) }));
 }
 
 /** The workbook's groups (Mice sheet), as a grouping for applyGroups, in the sheet's order. */
@@ -527,6 +778,30 @@ function survival(mice, keys, dates) {
   });
 }
 
+/**
+ * Kaplan–Meier from each mouse's treatment start, over the mice that have one and had not ended before it:
+ * [{ key, n, points: [{ day, s, atRisk, events }] }], `day` counted from the start. A mouse still alive is
+ * censored at the latest session.
+ */
+function survivalFromStart(mice, keys, latestDate) {
+  return keys.map(key => {
+    const members = mice.filter(m => m.cage === key && m.start && (!m.ended || m.endDate >= m.start));
+    const time = m => daysBetween(m.start, m.ended ? m.endDate : latestDate);
+    const ends = [...new Set(members.filter(m => m.ended).map(time))].sort((a, b) => a - b);
+    let s = 1;
+    const points = [{ day: 0, s, atRisk: members.length, events: 0 }];
+    for (const day of ends) {
+      const atRisk = members.filter(m => time(m) >= day).length;
+      const events = members.filter(m => m.ended && time(m) === day && isEvent(m)).length;
+      if (events && atRisk) s *= 1 - events / atRisk;
+      points.push({ day, s, atRisk, events });
+    }
+    const last = Math.max(0, ...members.map(time));
+    if (points[points.length - 1].day !== last) points.push({ day: last, s, atRisk: members.filter(m => time(m) >= last).length, events: 0 });
+    return { key, n: members.length, points };
+  });
+}
+
 /** Per-group mean ± SEM of every metric at every session. `keys` are the values of m.cage, in display order. */
 function summarizeGroups(mice, keys, dates) {
   return keys.map(cage => {
@@ -540,13 +815,26 @@ function summarizeGroups(mice, keys, dates) {
 }
 
 /**
+ * How many mice should have had an item: when the drug is on the schedule of some member (`scheduled`), the mice planned
+ * it that date (or day) plus any that got it anyway; else the lane's `eligible`. Never fewer than got it.
+ */
+function itemEligible(it, plannedMice, eligible, scheduled) {
+  const n = scheduled ? new Set([...plannedMice, ...it.mice]).size : eligible;
+  return Math.max(n, it.mice.length);
+}
+const plansDrug = (members, drug) => members.some(m => (m.planned || []).some(p => p.drug.toLowerCase() === drug.toLowerCase()));
+
+/**
  * Doses given to the mice whose `cage` is each key, for the dose strip: [{ key, doses: [{ date, eligible,
- * items: [{ drug, dose, volume, route, mice }] }] }], dates ascending. One item per drug/dose/volume/route given
- * that day (`mice` = ids that got it); `eligible` = members that had not ended by that date.
+ * items: [{ drug, dose, volume, route, mice, eligible }] }] }], dates ascending. One item per drug/dose/volume/route
+ * given that day (`mice` = ids that got it). `eligible` = members not ended by that date; when some member has a
+ * treatment start, only members started by then (staggered enrollment: mice not yet enrolled are not expected).
+ * An item's `eligible` is the mice planned that drug that day when there is a schedule (see `itemEligible`).
  */
 function dosesByKey(mice, keys) {
   return keys.map(key => {
     const members = mice.filter(m => m.cage === key);
+    const anyStart = members.some(m => m.start);
     const byDate = new Map();
     for (const m of members) {
       for (const inj of m.injections || []) {
@@ -557,9 +845,49 @@ function dosesByKey(mice, keys) {
         what.get(k).mice.push(m.id);
       }
     }
-    const doses = [...byDate.keys()].sort().map(date => ({
-      date, eligible: members.filter(m => !m.ended || m.endDate >= date).length, items: [...byDate.get(date).values()],
-    }));
+    const doses = [...byDate.keys()].sort().map(date => {
+      const eligible = members.filter(m => (!m.ended || m.endDate >= date) && (!anyStart || (m.start && m.start <= date))).length;
+      const items = [...byDate.get(date).values()].map(it => {
+        const planned = new Set(members.filter(m => (m.planned || []).some(p => p.date === date && p.drug.toLowerCase() === it.drug.toLowerCase())).map(m => m.id));
+        return { ...it, eligible: itemEligible(it, planned, eligible, plansDrug(members, it.drug)) };
+      });
+      return { date, eligible, items };
+    });
+    return { key, doses };
+  });
+}
+
+/**
+ * Doses as `dosesByKey`, but by day from each mouse's own treatment start, for the dose strip when the x axis is
+ * days from treatment start: [{ key, doses: [{ day, dates, eligible, items }] }]. Mice with no start are left out.
+ * `eligible` counts the mice that had reached that day by `asOf` (the data's cutoff) and not ended before it, so a
+ * mouse enrolled two days ago is not expected at day 10.
+ */
+function dosesByTreatDay(mice, keys, asOf = null) {
+  return keys.map(key => {
+    const members = mice.filter(m => m.cage === key && m.start);
+    const byDay = new Map();
+    for (const m of members) {
+      for (const inj of m.injections || []) {
+        const day = daysBetween(m.start, inj.date);
+        if (!byDay.has(day)) byDay.set(day, { dates: new Set(), what: new Map() });
+        const b = byDay.get(day);
+        b.dates.add(inj.date);
+        const k = [inj.drug, inj.dose, inj.volume, inj.route].join('|');
+        if (!b.what.has(k)) b.what.set(k, { drug: inj.drug, dose: inj.dose, volume: inj.volume, route: inj.route, mice: [] });
+        b.what.get(k).mice.push(m.id);
+      }
+    }
+    const doses = [...byDay.keys()].sort((a, b) => a - b).map(day => {
+      const eligible = members.filter(m => (!m.ended || daysBetween(m.start, m.endDate) >= day)
+        && (!asOf || daysBetween(m.start, asOf) >= day)).length;
+      const items = [...byDay.get(day).what.values()].map(it => {
+        const planned = new Set(members.filter(m => (m.planned || []).some(p => p.day === day && p.drug.toLowerCase() === it.drug.toLowerCase())
+          && (!asOf || addDays(m.start, day) <= asOf)).map(m => m.id));
+        return { ...it, eligible: itemEligible(it, planned, eligible, plansDrug(members, it.drug)) };
+      });
+      return { day, dates: [...byDay.get(day).dates].sort(), eligible, items };
+    });
     return { key, doses };
   });
 }
@@ -572,19 +900,36 @@ function dosesByKey(mice, keys) {
  * from the first session or dose to the last, `measured` marks session dates, and `items` are the doses given that
  * day, one per group or cage and drug/dose/volume/route: { key, drug, dose, volume, route, n, eligible, mice } (`n` of
  * `eligible` mice in the group or cage were given it, as in `dosesByKey`). Dates are ISO strings; all date math is UTC.
+ * With a schedule each cell also has `plans`: doses planned and not given, one per group or cage, drug and status
+ * (`missed` or `planned`): { key, drug, dose, volume, route, status, n, mice }, and the span reaches the last one.
+ * `opts.measure` (ISO dates) marks `toMeasure` on days after the last session that are measurement days.
  */
-function doseCalendar(mice, keys, sessionDates = []) {
+function doseCalendar(mice, keys, sessionDates = [], opts = {}) {
   const itemsOn = new Map();
   for (const lane of dosesByKey(mice, keys)) {
     for (const z of lane.doses) {
       if (!itemsOn.has(z.date)) itemsOn.set(z.date, []);
       for (const it of z.items) {
         itemsOn.get(z.date).push({ key: lane.key, drug: it.drug, dose: it.dose, volume: it.volume, route: it.route,
-          n: it.mice.length, eligible: z.eligible, mice: it.mice });
+          n: it.mice.length, eligible: it.eligible ?? z.eligible, mice: it.mice });
       }
     }
   }
-  const all = [...sessionDates, ...itemsOn.keys()].sort();
+  const plansOn = new Map();
+  for (const m of mice) {
+    if (!keys.includes(m.cage)) continue;
+    for (const p of m.planned || []) {
+      if (p.status === 'given') continue;
+      if (!plansOn.has(p.date)) plansOn.set(p.date, new Map());
+      const k = [m.cage, p.drug, p.dose, p.volume, p.route, p.status].join('|');
+      const on = plansOn.get(p.date);
+      if (!on.has(k)) on.set(k, { key: m.cage, drug: p.drug, dose: p.dose, volume: p.volume, route: p.route, status: p.status, mice: [] });
+      on.get(k).mice.push(m.id);
+    }
+  }
+  const lastSession = [...sessionDates].sort().pop() || '';
+  const toMeasure = new Set((opts.measure || []).filter(date => date > lastSession));
+  const all = [...sessionDates, ...itemsOn.keys(), ...plansOn.keys(), ...toMeasure].sort();
   if (!all.length) return [];
   const first = all[0];
   const last = all[all.length - 1];
@@ -603,6 +948,8 @@ function doseCalendar(mice, keys, sessionDates = []) {
       cells.push({
         date, day: origin ? Math.round((ts(date) - ts(origin)) / DAY) : null, inRange: date >= first && date <= last,
         measured: measured.has(date), items: itemsOn.get(date) || [],
+        plans: [...(plansOn.get(date) || new Map()).values()].map(p => ({ ...p, n: p.mice.length })),
+        toMeasure: toMeasure.has(date),
       });
     }
     while (cells.length % 7) cells.push(null);
@@ -615,6 +962,30 @@ function doseCalendar(mice, keys, sessionDates = []) {
     if (++m > 11) { m = 0; y += 1; }
   }
   return months;
+}
+
+/**
+ * The work for the days `from` .. `from + n - 1` (ISO): [{ date, measure, doses: [{ key, drug, dose, volume, route,
+ * mice }] }], one entry per day, `measure` true on measurement days (`measure` = ISO dates). Doses are the planned,
+ * not yet given doses of the mice whose `cage` is in `keys`, one per group or cage and drug/dose/volume/route.
+ */
+function upcomingWork(mice, keys, from, n, measure = []) {
+  const meas = new Set(measure);
+  return Array.from({ length: n }, (_, k) => {
+    const date = addDays(from, k);
+    const what = new Map();
+    for (const m of mice) {
+      if (!keys.includes(m.cage)) continue;
+      for (const p of m.planned || []) {
+        if (p.date !== date || p.status === 'given') continue;
+        const id = [m.cage, p.drug, p.dose, p.volume, p.route].join('|');
+        if (!what.has(id)) what.set(id, { key: m.cage, drug: p.drug, dose: p.dose, volume: p.volume, route: p.route, mice: [] });
+        what.get(id).mice.push(m.id);
+      }
+    }
+    const doses = [...what.values()].sort((a, b) => keys.indexOf(a.key) - keys.indexOf(b.key) || byNatural(a.drug, b.drug));
+    return { date, measure: meas.has(date), doses };
+  });
 }
 
 /* ----------------------------------------------------------------- groups */
@@ -707,6 +1078,8 @@ const store = {
 
 const fmtDate = (x, opts = { month: 'short', day: 'numeric' }) =>
   new Date(x).toLocaleDateString(undefined, { ...opts, timeZone: 'UTC' });
+/** Today on this device, as ISO (local date). */
+const localToday = () => { const n = new Date(); return `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, '0')}-${String(n.getDate()).padStart(2, '0')}`; };
 const fmtLongDate = iso => fmtDate(ts(iso), { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
 const fmt = (v, digits = 1) => (v === null || v === undefined ? '—' : v.toFixed(digits));
 const fmtSigned = (v, digits = 1) => (v === null || v === undefined ? '—' : (v > 0 ? '+' : v < 0 ? '−' : '') + Math.abs(v).toFixed(digits));
@@ -717,7 +1090,8 @@ const PREF_VALUES = {
   tumor: ['volume', 'rtv'],      // tumor volume, or relative to each mouse's first measured volume
   scale: ['linear', 'log'],      // tumor y axis
   error: ['sem', 'sd', 'none'],  // whiskers on the per-cage charts
-  x: ['date', 'day'],            // x axis: calendar date or study day
+  x: ['date', 'day', 'treat'],   // x axis: calendar date, study day, or days from each mouse's treatment start
+  base: ['first', 'start'],      // weight % change and relative volume from the first measurement or the treatment start
   theme: ['auto', 'light', 'dark'],
   order: ['value', 'mouse'],     // per-mouse bar charts
   heat: ['pct', 'weight', 'volume', 'rtv'],
@@ -725,7 +1099,7 @@ const PREF_VALUES = {
   // Falls back when the chosen one isn't there (see effectiveBy).
   by: ['group', 'cage', 'mine'],
 };
-const SORT_KEYS = ['id', 'where', 'weight', 'pct', 'volume', 'rtv', 'flags'];
+const SORT_KEYS = ['id', 'where', 'start', 'tday', 'weight', 'pct', 'volume', 'rtv', 'flags'];
 
 function loadPrefs() {
   let saved = {};
@@ -810,7 +1184,28 @@ const STATUS_TEXT = { euthanized: 'Euthanized', 'found dead': 'Found dead', remo
 const statusText = s => STATUS_TEXT[s] || (s ? s[0].toUpperCase() + s.slice(1) : 'Ended');
 /** "Euthanized Nov 12 (day 15) · weight loss" */
 const endText = m => `${statusText(m.status)} ${fmtDate(ts(m.endDate))} (day ${m.endDay})${m.endReason ? ` · ${m.endReason}` : ''}`;
-const xv = (d, k) => (state.prefs.x === 'day' ? d.days[k] : ts(d.dates[k]));
+// The treatment-start settings apply only when the workbook gives some group a Treatment start.
+const hasStarts = () => Boolean(state.base && state.base.hasStarts);
+const effX = () => (state.prefs.x === 'treat' && !hasStarts() ? 'date' : state.prefs.x);
+const effBase = () => (state.prefs.base === 'start' && hasStarts() ? 'start' : 'first');
+const treatMode = () => effX() === 'treat';
+// From treatment start, means are taken in steps of the measurement cadence (Groups sheet), so staggered starts line up.
+const binDays = () => (treatMode() && state.base && state.base.cadence ? state.base.cadence.every : 1);
+const binDay = t => { const b = binDays(); return b > 1 ? Math.ceil(t / b) * b || 0 : t; };
+const xv = (d, k) => (effX() === 'day' ? d.days[k] : ts(d.dates[k]));
+// Wording that follows the baseline setting.
+const FROM_START = {
+  pct: { axis: 'Change from weight at treatment start (%)', what: '% change from each mouse’s weight at its treatment start' },
+  rtv: { axis: 'Tumor volume (× at treatment start)', what: 'each mouse’s volume ÷ its volume at its treatment start' },
+};
+const axisTitle = metric => (effBase() === 'start' && FROM_START[metric] ? FROM_START[metric].axis : METRICS[metric].axis);
+const noStartNote = n => (n ? ` ${n} ${n > 1 ? 'mice' : 'mouse'} with no treatment start ${n > 1 ? 'are' : 'is'} left out.` : '');
+// Relative volume from treatment start needs a volume on or before the start: say how many tumor-bearing mice lack one.
+function noBaselineNote(d, metric, mice) {
+  if (!d.rebased || metric !== 'rtv') return '';
+  const n = mice.filter(m => m.start && m.startVolume === null && m.points.some(p => p.volume !== null)).length;
+  return n ? ` ${n} ${n > 1 ? 'mice' : 'mouse'} with no tumor measured by the treatment start ${n > 1 ? 'have' : 'has'} no relative volume.` : '';
+}
 const errName = () => ({ sem: 'SEM', sd: 'SD', none: '' }[state.prefs.error]);
 
 /* ---------------------------------------------------------- chart plugins */
@@ -901,7 +1296,7 @@ const endLabels = {
 // Doses: a strip between the plot and the x axis, one lane per shown group or cage that was dosed, with a ▲ in
 // the lane's color on each dose date (filled: every mouse in the lane got it; hollow: only some did). Hovering
 // or tapping the strip shows what each lane got that day. options.plugins.doses = { lanes: [{ label, color,
-// doses: [{ x, date, day, eligible, items }] }], ink, ink2, muted, grid, surface, axis }.
+// doses: [{ x, title, eligible, items }] }], ink, ink2, muted, grid, surface, axis }; doses at the same x share a box.
 // Lane height: tighter on short (phone) charts so a strip of several lanes leaves room for the plot.
 const doseLane = chart => (chart.height < 340 ? 8 : 11);
 const doseText = it => [it.drug, it.dose, it.volume ? `${it.volume} µL` : '', it.route].filter(Boolean).join(' · ');
@@ -947,7 +1342,7 @@ const doseStrip = {
       for (const l of lanes) {
         for (const dz of l.doses) {
           const dist = Math.abs(chart.scales.x.getPixelForValue(dz.x) - e.x);
-          if (dist < best) { best = dist; hit = dz.date; }
+          if (dist < best) { best = dist; hit = dz.x; }
         }
       }
     }
@@ -956,21 +1351,21 @@ const doseStrip = {
     // Over the strip: the dose box replaces the chart's own tooltip and hover.
     if (chart.getActiveElements().length) chart.setActiveElements([]);
     if (chart.tooltip && chart.tooltip.getActiveElements().length) chart.tooltip.setActiveElements([], { x: e.x, y: e.y });
-    e.native.target.style.cursor = hit ? 'help' : '';
+    e.native.target.style.cursor = hit !== null ? 'help' : '';
     chart.render();
     return false;
   },
   afterDraw(chart) {
-    const date = chart.$doseHit;
-    if (!date) return;
+    const at = chart.$doseHit;
+    if (at === null || at === undefined) return;
     const box = chart.$doseBox;
     const o = box.opts;
-    const hits = (o.lanes || []).map(l => ({ l, dz: l.doses.find(z => z.date === date) })).filter(h => h.dz);
+    const hits = (o.lanes || []).map(l => ({ l, dz: l.doses.find(z => z.x === at) })).filter(h => h.dz);
     if (!hits.length) return;
     const { ctx, chartArea: a } = chart;
-    const px = chart.scales.x.getPixelForValue(hits[0].dz.x);
-    const title = `Dosed ${fmtLongDate(date)} · Day ${hits[0].dz.day}`;
-    const lines = hits.flatMap(({ l, dz }) => dz.items.map(it => ({ color: l.color, text: `${l.label}: ${doseText(it)} (${doseCount(it, dz.eligible)})` })));
+    const px = chart.scales.x.getPixelForValue(at);
+    const title = hits[0].dz.title;
+    const lines = hits.flatMap(({ l, dz }) => dz.items.map(it => ({ color: l.color, text: `${l.label}: ${doseText(it)} (${doseCount(it, it.eligible ?? dz.eligible)})` })));
     ctx.save();
     ctx.strokeStyle = o.muted;
     ctx.lineWidth = 1;
@@ -1033,7 +1428,7 @@ function drawDoseLanes(chart, box) {
     for (const dz of l.doses) {
       const px = x.getPixelForValue(dz.x);
       if (px < a.left - 1 || px > a.right + 1) continue;
-      const all = new Set(dz.items.flatMap(it => it.mice)).size >= dz.eligible;
+      const all = dz.items.every(it => it.mice.length >= (it.eligible ?? dz.eligible));
       doseTriangle(ctx, px, cy, lane < 10 ? 3.2 : 4, all);
     }
   });
@@ -1042,23 +1437,38 @@ function drawDoseLanes(chart, box) {
 
 /* --------------------------------------------------------- chart options */
 
-// x of any date (an end date can fall between sessions).
-const xOfDate = (d, date) => (state.prefs.x === 'day' ? Math.round((ts(date) - ts(d.dates[0])) / DAY) : ts(date));
+// x of any date on the date or study-day axis (an end date can fall between sessions).
+const xOfDate = (d, date) => (effX() === 'day' ? daysBetween(d.dates[0], date) : ts(date));
 
-function xScale(t, d, extraDates = []) {
-  const day = state.prefs.x === 'day';
-  const xs = d.dates.map((_, k) => xv(d, k));
-  const all = [...xs, ...extraDates.map(date => xOfDate(d, date))];
+// The x values that get a tick: the sessions, or with x = treatment, every day (or step, see binDays) from treatment
+// start on which a shown mouse with a start had a session.
+function tickXs(d) {
+  if (!treatMode()) return d.dates.map((_, k) => xv(d, k));
+  const shown = shownCages(d);
+  return [...new Set(d.mice.filter(m => m.start && shown.includes(m.cage)).flatMap(m => m.points.map(p => binDay(p.tday))))].sort((a, b) => a - b);
+}
+
+function xScale(t, d, extraXs = []) {
+  const byDate = effX() === 'date';
+  const xs = tickXs(d);
+  // With binning the ticks are the steps, but each mouse's own line keeps its exact days: keep those in range too.
+  const exact = treatMode() && binDays() > 1
+    ? d.mice.filter(m => m.start && shownCages(d).includes(m.cage)).flatMap(m => m.points.filter(p => p.weight !== null || p.volume !== null).map(p => p.tday))
+    : [];
+  const all = [...xs, ...extraXs, ...exact];
+  if (!all.length) all.push(0);
   const lo = Math.min(...all);
   const hi = Math.max(...all);
-  const unit = day ? 1 : DAY;
+  const unit = byDate ? DAY : 1;
   const pad = Math.max(0.4 * unit, (hi - lo) * 0.03);
   return {
     type: 'linear',
     min: lo - pad,
     max: hi + pad,
     afterBuildTicks: axis => { axis.ticks = xs.map(value => ({ value })); },
-    ticks: { color: t.muted, maxRotation: 0, autoSkip: true, callback: v => (day ? `Day ${v}` : fmtDate(v)) },
+    // From treatment start the ticks are denser (one per session per start) and the axis has a title: numbers only.
+    ticks: { color: t.muted, maxRotation: 0, autoSkip: true, callback: v => (byDate ? fmtDate(v) : treatMode() ? `${v}` : `Day ${v}`) },
+    title: { display: treatMode(), text: 'Days from treatment start', color: t.ink2 },
     grid: { color: t.grid },
     border: { color: t.axis },
   };
@@ -1076,7 +1486,7 @@ function yScale(t, metric) {
   const log = M.tumor && state.prefs.scale === 'log';
   const y = {
     type: log ? 'logarithmic' : 'linear',
-    title: { display: true, text: M.axis, color: t.ink2 },
+    title: { display: true, text: axisTitle(metric), color: t.ink2 },
     ticks: { color: t.muted, callback: log ? logTick(M) : v => M.tick(v) },
     grid: { color: t.grid },
     border: { color: t.axis },
@@ -1084,6 +1494,18 @@ function yScale(t, metric) {
   if (metric === 'pct') { y.suggestedMin = -22; y.suggestedMax = 5; }
   if (M.tumor && !log) y.beginAtZero = true;
   return y;
+}
+
+/** Tooltip title of a time-chart point: its date and study day, or its day from treatment start (and the date(s)). */
+function pointTitle(raw) {
+  if (!raw) return '';
+  if (treatMode()) {
+    const dates = raw.dates || (raw.date ? [raw.date] : []);
+    const span = raw.tdays && (raw.tdays.length > 1 || raw.tdays[0] !== raw.tday)
+      ? ` (day${raw.tdays.length > 1 ? 's' : ''} ${raw.tdays.length > 1 ? `${raw.tdays[0]}–${raw.tdays[raw.tdays.length - 1]}` : raw.tdays[0]})` : '';
+    return `Treatment day ${raw.tday}${span}${dates.length ? ` · ${dates.length === 1 ? fmtLongDate(dates[0]) : dates.map(x => fmtDate(ts(x))).join(', ')}` : ''}`;
+  }
+  return raw.date ? `${fmtLongDate(raw.date)} · Day ${raw.day}` : '';
 }
 
 function chartOptions(t, d, metric) {
@@ -1104,12 +1526,13 @@ function chartOptions(t, d, metric) {
         backgroundColor: t.surface, titleColor: t.ink, bodyColor: t.ink2, borderColor: t.axis, borderWidth: 1,
         padding: 10, usePointStyle: true, boxWidth: 8, boxHeight: 8,
         callbacks: {
-          title: items => (items.length && items[0].raw.date ? `${fmtLongDate(items[0].raw.date)} · Day ${items[0].raw.day}` : ''),
+          title: items => pointTitle(items.length ? items[0].raw : null),
         },
       },
+      // The −15% and −20% lines are humane endpoints from the first weight, so they are left off a chart from treatment start.
       refLines: {
         labelColor: t.ink2,
-        lines: metric === 'pct' ? [
+        lines: metric === 'pct' && !d.rebased ? [
           { y: LOSS_WARNING, color: t.warning, label: '−15%' },
           { y: LOSS_ALERT, color: t.critical, label: '−20%' },
         ] : [],
@@ -1121,21 +1544,23 @@ function chartOptions(t, d, metric) {
 }
 
 /** Dose strip lanes for the shown groups or cages that were dosed, colored like their series. */
+// With x = treatment, each mouse's doses are placed by its own start, so a lane's ▲ can stand for several dates.
 function doseLanes(t, d, shown) {
   if (!d.injectionDates || !d.injectionDates.length) return [];
-  return dosesByKey(d.mice, d.cages)
+  const treat = treatMode();
+  const place = treat
+    ? z => ({ ...z, x: z.day, title: `Dosed on treatment day ${z.day} · ${z.dates.map(x => fmtDate(ts(x))).join(', ')}` })
+    : z => ({ ...z, x: xOfDate(d, z.date), title: `Dosed ${fmtLongDate(z.date)} · Day ${daysBetween(d.dates[0], z.date)}` });
+  return (treat ? dosesByTreatDay(d.mice, d.cages, d.cutoff) : dosesByKey(d.mice, d.cages))
     .map((g, k) => ({ g, k }))
     .filter(({ g }) => shown.includes(g.key) && g.doses.length)
-    .map(({ g, k }) => ({
-      label: cageName(d, g.key), color: seriesStyle(t, k).color,
-      doses: g.doses.map(z => ({ ...z, x: xOfDate(d, z.date), day: Math.round((ts(z.date) - ts(d.dates[0])) / DAY) })),
-    }));
+    .map(({ g, k }) => ({ label: cageName(d, g.key), color: seriesStyle(t, k).color, doses: g.doses.map(place) }));
 }
 
 /** Put the dose strip on a time chart: lanes, and an x axis wide enough for doses outside the sessions. */
-function addDoses(opts, t, d, lanes, extraDates = []) {
+function addDoses(opts, t, d, lanes, extraXs = []) {
   opts.plugins.doses.lanes = lanes;
-  opts.scales.x = xScale(t, d, [...extraDates, ...lanes.flatMap(l => l.doses.map(z => z.date))]);
+  opts.scales.x = xScale(t, d, [...extraXs, ...lanes.flatMap(l => l.doses.map(z => z.x))]);
 }
 const DOSE_KEY = '▲ dose (tap or hover the strip for the drug)';
 
@@ -1213,31 +1638,41 @@ function renderGroupChart(root, t, d, id, metric, title) {
   const M = METRICS[metric];
   const what = { pct: '% change from each mouse’s first recorded weight', weight: 'body weight',
     volume: 'longer side × shorter side² / 2', rtv: 'each mouse’s volume ÷ its first measured volume' }[metric];
+  const treat = treatMode();
   const shown = shownCages(d);
   const lanes = doseLanes(t, d, shown);
-  const sub = `${errName() ? `Mean ± ${errName()}` : 'Mean'} of ${what}.${lanes.length ? ` ${DOSE_KEY}.` : ''}`;
+  const left = treat ? d.mice.filter(m => shown.includes(m.cage) && !m.start).length : 0;
+  const sub = `${errName() ? `Mean ± ${errName()}` : 'Mean'} of ${effBase() === 'start' && FROM_START[metric] ? FROM_START[metric].what : what}.${
+    treat ? ` Day 0 is each mouse’s treatment start.${binDays() > 1 ? ` Days are grouped in ${binDays()}-day steps (measured every ${binDays()} days).` : ''}` : ''}${noStartNote(left)}${
+    noBaselineNote(d, metric, d.mice.filter(m => shown.includes(m.cage)))}${lanes.length ? ` ${DOSE_KEY}.` : ''}`;
   const sec = card(id, title, sub, CHART_TOOLS, { hint: `Click a ${d.unit} in the legend to hide it.` });
   root.appendChild(sec);
-  if (!d.groups.some(g => shown.includes(g.cage) && g[metric].some(p => p.n > 0))) {
+
+  // Points per group or cage: { x, mean, sem, n, date, day } per session, or with x = treatment per day from start.
+  const xs = tickXs(d);
+  const series = d.groups.map(g => (treat
+    ? summarizeByTreatDay(d.mice.filter(m => m.cage === g.cage), metric, binDays())
+      .map(b => ({ ...b, x: b.day, tday: b.day, date: b.dates.length === 1 ? b.dates[0] : null }))
+    : g[metric].map((p, i) => ({ ...p, x: xs[i], day: d.days[i] }))));
+  if (!d.groups.some((g, k) => shown.includes(g.cage) && series[k].some(p => p.n > 0))) {
     empty(sec, M.tumor ? 'No tumor measurements yet.' : 'No measurements yet.');
     return;
   }
 
   const n = d.groups.length;
-  const xs = d.dates.map((_, k) => xv(d, k));
-  const unit = state.prefs.x === 'day' ? 1 : DAY;
+  const unit = effX() === 'date' ? DAY : 1;
   const span = xs.length > 1 ? Math.min(...xs.slice(1).map((x, k) => x - xs[k])) : unit;
   const step = Math.min(0.08 * unit, (span * 0.5) / Math.max(n, 1));
   const errKey = state.prefs.error;
   const datasets = d.groups.map((g, k) => {
     const { color, dash } = seriesStyle(t, k);
     const nudge = (k - (n - 1) / 2) * step;
-    const pts = g[metric];
+    const pts = series[k];
     const err = errKey === 'none' ? null
       : pts.map(p => (p.sem === null ? null : errKey === 'sd' ? p.sem * Math.sqrt(p.n) : p.sem));
     return {
       label: cageName(d, g.cage), cage: g.cage, hidden: !shown.includes(g.cage),
-      data: pts.map((p, i) => ({ x: xs[i] + nudge, y: p.mean, date: p.date, day: d.days[i], n: p.n, err: err ? err[i] : null })),
+      data: pts.map((p, i) => ({ x: p.x + nudge, y: p.mean, date: p.date, dates: p.dates, tdays: p.tdays, day: p.day, tday: p.tday, n: p.n, err: err ? err[i] : null })),
       err,
       borderColor: color, backgroundColor: color, borderDash: dash,
       borderWidth: 2, pointRadius: 4, pointHoverRadius: 6, pointBorderColor: t.surface, pointBorderWidth: 1.5,
@@ -1251,11 +1686,16 @@ function renderGroupChart(root, t, d, id, metric, title) {
   opts.plugins.tooltip.callbacks.label = c =>
     `${c.dataset.label}: ${M.val(c.raw.y)}${c.raw.err !== null ? ` ± ${M.err(c.raw.err)}` : ''} (n=${c.raw.n})`;
   state.views[id].chart = makeChart(chartBox(sec), { type: 'line', data: { datasets }, options: opts });
-  state.views[id].rows = () => [
+  const sd = p => num(p.sem === null ? null : p.sem * Math.sqrt(p.n));
+  state.views[id].rows = () => (treat ? [
+    [d.unit, 'treatment_day', 'days_included', 'dates', 'mean', 'sem', 'sd', 'n'],
+    ...d.groups.flatMap((g, k) => (shown.includes(g.cage) ? series[k] : []).map(p => [
+      cageText(d, g.cage), p.tday, p.tdays.join(' '), p.dates.join(' '), num(p.mean), num(p.sem), sd(p), p.n])),
+  ] : [
     [d.unit, 'date', 'study_day', 'mean', 'sem', 'sd', 'n'],
-    ...d.groups.filter(g => shown.includes(g.cage)).flatMap(g => g[metric].map((p, i) => [
-      cageText(d, g.cage), p.date, d.days[i], num(p.mean), num(p.sem), num(p.sem === null ? null : p.sem * Math.sqrt(p.n)), p.n])),
-  ];
+    ...d.groups.flatMap((g, k) => (shown.includes(g.cage) ? series[k] : []).map(p => [
+      cageText(d, g.cage), p.date, p.day, num(p.mean), num(p.sem), sd(p), p.n])),
+  ]);
 }
 
 // Dim every line but the hovered (or highlighted) one.
@@ -1280,17 +1720,22 @@ const markerBorder = c => (c.raw && c.raw.end ? 2.5 : 1);
 // and each line is labelled at its end.
 function renderMiceChart(root, t, d, id, metric, title) {
   const M = METRICS[metric];
+  const treat = treatMode();
   const shown = shownCages(d);
-  const mice = d.mice.filter(m => shown.includes(m.cage));
+  const inShown = d.mice.filter(m => shown.includes(m.cage));
+  const mice = treat ? inShown.filter(m => m.start) : inShown;
   const lanes = doseLanes(t, d, shown);
   const keys = [mice.some(m => m.points.some(p => p.moved)) && '◆ moved cage', mice.some(m => m.ended) && '✕ ended',
     lanes.length && DOSE_KEY].filter(Boolean);
-  const sub = `One line per mouse.${keys.length ? ` ${keys.join(', ')}.` : ''}`;
+  const sub = `One line per mouse.${treat ? ' Day 0 is each mouse’s treatment start.' : ''}${noStartNote(inShown.length - mice.length)}${
+    noBaselineNote(d, metric, mice)}${
+    keys.length ? ` ${keys.join(', ')}.` : ''}`;
   const sec = card(id, title, sub, CHART_TOOLS, { hint: 'Hover to pick out a mouse; click to highlight it everywhere.' });
   root.appendChild(sec);
+  const starts = d.hasStarts;
   state.views[id].rows = () => [
-    [...idHead(d), 'date', 'study_day', 'cage_that_day', 'tail_mark_that_day', metric],
-    ...mice.flatMap(m => m.points.map(p => [...idVals(d, m), p.date, p.day, p.cage, p.mark, num(p[metric])])),
+    [...idHead(d), 'date', 'study_day', ...(starts ? ['treatment_day'] : []), 'cage_that_day', 'tail_mark_that_day', metric],
+    ...mice.flatMap(m => m.points.map(p => [...idVals(d, m), p.date, p.day, ...(starts ? [p.tday] : []), p.cage, p.mark, num(p[metric])])),
   ];
   if (!mice.some(m => m.points.some(p => p[metric] !== null))) {
     empty(sec, M.tumor ? 'No tumor measurements yet.' : 'No measurements yet.');
@@ -1304,7 +1749,8 @@ function renderMiceChart(root, t, d, id, metric, title) {
     return {
       label: m.id, mouse: m.id, cage: m.cage, $m: m,
       data: m.points.map((p, i) => ({
-        x: xv(d, i), y: p[metric], date: p.date, day: p.day, cage: p.cage, mark: p.mark, moved: p.moved, end: p.end, note: p.note,
+        x: treat ? p.tday : xv(d, i), y: p[metric], date: p.date, day: p.day, tday: p.tday,
+        cage: p.cage, mark: p.mark, moved: p.moved, end: p.end, note: p.note,
       })),
       $color: color, $ring: t.surface, $width: width, borderDash: dash,
       pointStyle: markerStyle, pointRadius: markerRadius(solo ? 3.5 : 2.5), pointHoverRadius: markerRadius(6),
@@ -1415,10 +1861,14 @@ const TABLE_COLS = [
   { key: 'rtv', label: 'Rel. vol.', show: v => (v === null ? '—' : `${fmt(v, 2)}×`) },
   { key: 'flags', label: 'Flags' },
 ];
+// With treatment starts, each mouse's start and its days on treatment at the latest session come after Cage · tail.
+const START_COL = { key: 'start', label: 'Start', show: v => (v ? fmtDate(ts(v)) : '—') };
+const TDAY_COL = { key: 'tday', label: 'Days treated', show: v => (v === null ? '—' : v) };
+const tableCols = d => (d.hasStarts ? [...TABLE_COLS.slice(0, 2), START_COL, TDAY_COL, ...TABLE_COLS.slice(2)] : TABLE_COLS);
 
 function sortRows(d, rows) {
   const { key, dir } = state.prefs.sort;
-  const val = r => (key === 'flags' ? FLAG_RANK(r) : r[key]);
+  const val = r => (key === 'flags' ? FLAG_RANK(r) : key === 'start' ? (r.start ? ts(r.start) : null) : r[key]);
   const pos = r => d.cages.indexOf(r.cage);
   return [...rows].sort((a, b) => {
     if (key === 'id') {
@@ -1440,8 +1890,12 @@ const mouseCell = (d, id, cage, ended = '') =>
 function renderLatestTable(root, d) {
   const shown = shownCages(d);
   const rows = sortRows(d, d.latest.filter(r => shown.includes(r.cage)));
+  const cols = tableCols(d);
+  const sub = d.rebased
+    ? 'Change and relative volume are from each mouse’s treatment start; the weight-loss flags stay on its first recorded weight.'
+    : 'Change is from each mouse’s first recorded weight.';
   const sec = card('table', `Latest values · ${fmtDate(ts(d.latestDate), { month: 'short', day: 'numeric', year: 'numeric' })}`,
-    'Change is from each mouse’s first recorded weight.', TABLE_TOOLS, { hint: 'Click a column to sort, a row to highlight the mouse.' });
+    sub, TABLE_TOOLS, { hint: 'Click a column to sort, a row to highlight the mouse.' });
   const counts = {};
   rows.forEach(r => r.flags.forEach(f => { counts[f] = (counts[f] || 0) + 1; }));
   const summary = Object.keys(FLAGS).filter(f => counts[f])
@@ -1449,7 +1903,7 @@ function renderLatestTable(root, d) {
   sec.insertAdjacentHTML('beforeend', `<p class="flags-summary">${summary.length ? summary.join(' ') : 'No flags.'}</p>`);
 
   const { key, dir } = state.prefs.sort;
-  const head = TABLE_COLS.map(c => {
+  const head = cols.map(c => {
     const sort = c.key === key ? (dir === 1 ? 'ascending' : 'descending') : 'none';
     return `<th scope="col" aria-sort="${sort}"><button type="button" data-sort="${c.key}">${c.label}<span class="arrow" aria-hidden="true">${
       c.key === key ? (dir === 1 ? '▲' : '▼') : ''}</span></button></th>`;
@@ -1460,13 +1914,16 @@ function renderLatestTable(root, d) {
     const cls = [rowCls ? FLAGS[rowCls].cls : '', r.id === state.focus ? 'focused' : ''].join(' ').trim();
     return `<tr class="${cls}" data-mouse="${escapeHtml(r.id)}" tabindex="0">${mouseCell(d, r.id, r.cage)}<td class="where">${
       escapeHtml(placeText(realCage(r), r.mouse))}</td>${
-      TABLE_COLS.slice(2, -1).map(c => `<td>${c.show(r[c.key])}</td>`).join('')}<td>${flags}</td></tr>`;
+      cols.slice(2, -1).map(c => `<td>${c.show(r[c.key])}</td>`).join('')}<td>${flags}</td></tr>`;
   }).join('');
   sec.insertAdjacentHTML('beforeend', `<div class="table-wrap"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`);
   root.appendChild(sec);
+  const starts = d.hasStarts;
+  const from = d.rebased ? '_from_start' : '';
   state.views.table.rows = () => [
-    [...idHead(d), 'tail_mark', 'weight_g', 'weight_pct_change', 'tumor_volume', 'relative_tumor_volume', 'last_seen', 'status', 'end_date', 'end_reason', 'flags'],
-    ...rows.map(r => [...idVals(d, r), r.mouse, num(r.weight), num(r.pct), num(r.volume), num(r.rtv), r.lastSeen,
+    [...idHead(d), 'tail_mark', ...(starts ? ['treatment_start', 'days_treated'] : []), 'weight_g', `weight_pct_change${from}`, 'tumor_volume',
+      `relative_tumor_volume${from}`, 'last_seen', 'status', 'end_date', 'end_reason', 'flags'],
+    ...rows.map(r => [...idVals(d, r), r.mouse, ...(starts ? [r.start, r.tday] : []), num(r.weight), num(r.pct), num(r.volume), num(r.rtv), r.lastSeen,
       r.status, r.endDate, r.endReason, r.flags.join(' ')]),
   ];
 }
@@ -1497,7 +1954,7 @@ function renderHeatmap(root, d) {
     const s = hi > lo ? (tf(v) - lo) / (hi - lo) : 0.5;
     return `background:color-mix(in oklab, var(--series-1) ${Math.round(4 + 62 * s)}%, var(--surface))`;
   };
-  const colLabel = k => (state.prefs.x === 'day' ? `Day ${d.days[k]}` : fmtDate(ts(d.dates[k])));
+  const colLabel = k => (effX() === 'day' ? `Day ${d.days[k]}` : fmtDate(ts(d.dates[k])));
   const head = `<th scope="col">Mouse</th>${d.dates.map((date, k) => `<th scope="col" title="${fmtLongDate(date)}">${colLabel(k)}</th>`).join('')}`;
   let prevCage = null;
   const body = mice.map(m => {
@@ -1508,7 +1965,8 @@ function renderHeatmap(root, d) {
       const text = v === null ? '' : metric === 'pct' ? fmtSigned(v) : v.toFixed(M.digits);
       const what = after ? endText(m) : v === null ? 'not measured' : M.val(v);
       const where = placeLong(p.cage, p.mark);
-      const tip = `${m.id}${where ? ` (${where})` : ''} · ${fmtLongDate(p.date)}: ${what}${p.moved ? ` · moved from ${placeLong(p.moved.cage, p.moved.mark)}` : ''}`;
+      const tip = `${m.id}${where ? ` (${where})` : ''} · ${fmtLongDate(p.date)}${p.tday !== null ? ` (treatment day ${p.tday})` : ''}: ${what}${
+        p.moved ? ` · moved from ${placeLong(p.moved.cage, p.moved.mark)}` : ''}`;
       return `<td style="${after ? '' : shade(v)}"${cls.length ? ` class="${cls.join(' ')}"` : ''} title="${escapeHtml(tip)}">${text}</td>`;
     }).join('');
     const cls = [m.cage !== prevCage && prevCage !== null ? 'cage-start' : '', m.id === state.focus ? 'focused' : ''].join(' ').trim();
@@ -1534,7 +1992,7 @@ function renderDoses(root, d) {
   const sec = card('doses', 'Injections', `${n} dose${n === 1 ? '' : 's'} on ${dates.length} day${dates.length === 1 ? '' : 's'}, from the Injections sheet.`,
     TABLE_TOOLS, { hint: 'Hover a cell for dose and volume.' });
   const day = date => Math.round((ts(date) - ts(d.dates[0])) / DAY);
-  const colLabel = date => (state.prefs.x === 'day' ? `Day ${day(date)}` : fmtDate(ts(date)));
+  const colLabel = date => (effX() === 'day' ? `Day ${day(date)}` : fmtDate(ts(date)));
   const head = `<th scope="col">Mouse</th>${dates.map(date => `<th scope="col" title="${fmtLongDate(date)}">${colLabel(date)}</th>`).join('')}`;
   let prevCage = null;
   const body = mice.map(m => {
@@ -1562,43 +2020,59 @@ const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
 // The injections as month calendars (from the Injections sheet). Each dose is a chip in its group's or cage's color
 // with the drug and "mice given / mice in the group"; a dashed chip means only some of them got it. ● = measurement day.
+// With a schedule (Regimens Days), doses planned and not given show as dotted chips (red when missed), and ○ marks the
+// coming measurement days (Groups sheet cadence) for two weeks past today or the latest session.
 // On a phone the cells show only colored dots and the doses are listed under each month, since there is no hover.
 function renderDoseCalendar(root, d) {
-  if (!d.injectionDates || !d.injectionDates.length) return;
   const shown = shownCages(d);
   const mice = d.mice.filter(m => shown.includes(m.cage));
-  const months = doseCalendar(mice, shown, d.dates);
-  const doseDays = months.flatMap(mo => mo.weeks.flat()).filter(c => c && c.items.length);
-  if (!doseDays.length) return;
+  const today = localToday();
+  const horizon = addDays([d.latestDate, today].sort().pop(), 13);
+  const months = doseCalendar(mice, shown, d.dates, { measure: measureDates(d.cadence, d.latestDate, d.dates[0], horizon) });
+  const cells = months.flatMap(mo => mo.weeks.flat()).filter(Boolean);
+  const doseDays = cells.filter(c => c.items.length);
+  const planDays = cells.filter(c => c.plans.length);
+  if (!doseDays.length && !planDays.length && !cells.some(c => c.toMeasure)) return;
   const n = doseDays.reduce((k, c) => k + c.items.reduce((j, it) => j + it.n, 0), 0);
-  const sec = card('dose-calendar', 'Injection calendar',
-    `${n} dose${n === 1 ? '' : 's'} on ${doseDays.length} day${doseDays.length === 1 ? '' : 's'}, colored by ${d.unit}. Dashed: only some mice. ● measured.`,
-    TABLE_TOOLS, { hint: state.focus ? `Outlined: doses given to ${escapeHtml(state.focus)}.` : 'Hover a dose for the dose and volume.' });
-  const now = new Date();
-  const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-  const color = key => seriesVar(d.cages.indexOf(key));
+  const missed = planDays.reduce((k, c) => k + c.plans.filter(p => p.status === 'missed').reduce((j, p) => j + p.n, 0), 0);
+  const key = [`${n} dose${n === 1 ? '' : 's'} on ${doseDays.length} day${doseDays.length === 1 ? '' : 's'}, colored by ${d.unit}.`,
+    'Dashed: only some mice.', planDays.length ? `Dotted: planned${missed ? `; red: ${missed} missed` : ''}.` : '', '● measured.',
+    cells.some(c => c.toMeasure) ? '○ to measure.' : ''].filter(Boolean).join(' ');
+  const sec = card('dose-calendar', 'Injection calendar', key,
+    TABLE_TOOLS, { hint: state.focus ? `Outlined: doses of ${escapeHtml(state.focus)}.` : 'Hover a dose for the dose and volume.' });
+  const color = k => seriesVar(d.cages.indexOf(k));
   const tip = it => `${cageName(d, it.key)}: ${doseText(it)} · ${it.n} of ${it.eligible} mice (${it.mice.join(', ')})`;
-  const chip = it => `<div class="cal-item${it.n < it.eligible ? ' partial' : ''}${state.focus && it.mice.includes(state.focus) ? ' mine' : ''}" style="--c:${
+  const planTip = p => `${p.status === 'missed' ? 'Missed' : 'Planned'} · ${cageName(d, p.key)}: ${doseText(p)} · ${p.n} ${p.n > 1 ? 'mice' : 'mouse'} (${p.mice.join(', ')})`;
+  const mine = it => state.focus && it.mice.includes(state.focus);
+  const chip = it => `<div class="cal-item${it.n < it.eligible ? ' partial' : ''}${mine(it) ? ' mine' : ''}" style="--c:${
     color(it.key)}" title="${escapeHtml(tip(it))}"><span class="cal-drug">${escapeHtml(it.drug)}</span> <span class="cal-key">${
     escapeHtml(cageText(d, it.key))}</span> <span class="cal-n">${it.n}/${it.eligible}</span></div>`;
-  const byDay = state.prefs.x === 'day';
+  const planChip = p => `<div class="cal-item plan ${p.status}${mine(p) ? ' mine' : ''}" style="--c:${color(p.key)}" title="${
+    escapeHtml(planTip(p))}"><span class="cal-drug">${escapeHtml(p.drug)}</span> <span class="cal-key">${escapeHtml(cageText(d, p.key))}</span> <span class="cal-n">${
+    p.status === 'missed' ? `${p.n} missed` : p.n}</span></div>`;
+  const dot = (k, cls) => `<span class="cal-dot${cls ? ` ${cls}` : ''}" style="--c:${color(k)}"></span>`;
+  const byDay = effX() === 'day';
   const cell = c => {
     if (!c) return '<div class="cal-cell blank"></div>';
     const dayNo = Number(c.date.slice(8));
     const study = c.day === null || !c.inRange ? '' : `D${c.day}`;
     const [big, small] = byDay && study ? [study, dayNo] : [dayNo, study];
     const cls = ['cal-cell', c.inRange ? '' : 'out', c.items.length ? 'dosed' : '', c.date === today ? 'today' : '',
-      state.focus && c.items.some(it => it.mice.includes(state.focus)) ? 'has-focus' : ''].filter(Boolean).join(' ');
-    const label = `${fmtLongDate(c.date)}${c.items.length ? `: ${c.items.map(tip).join('; ')}` : ''}`;
+      state.focus && [...c.items, ...c.plans].some(mine) ? 'has-focus' : ''].filter(Boolean).join(' ');
+    const label = `${fmtLongDate(c.date)}${c.toMeasure ? ', to measure' : ''}${[...c.items.map(tip), ...c.plans.map(planTip)].map(x => `: ${x}`).join(';')}`;
+    const mark = c.measured ? '<span class="cal-meas" title="Measured this day" aria-label="measured">●</span>'
+      : c.toMeasure ? '<span class="cal-meas" title="Measurement day" aria-label="to measure">○</span>' : '';
+    const dots = [...c.items.map(it => dot(it.key, it.n < it.eligible ? 'partial' : '')), ...c.plans.map(p => dot(p.key, `plan ${p.status}`))];
     return `<div class="${cls}" role="group" aria-label="${escapeHtml(label)}"><div class="cal-top"><span class="cal-num">${big}</span>${
-      small !== '' ? `<span class="cal-sub">${small}</span>` : ''}${c.measured ? '<span class="cal-meas" title="Measured this day" aria-label="measured">●</span>' : ''}</div>${
-      c.items.map(chip).join('')}${c.items.length ? `<div class="cal-dots">${c.items.map(it =>
-        `<span class="cal-dot${it.n < it.eligible ? ' partial' : ''}" style="--c:${color(it.key)}"></span>`).join('')}</div>` : ''}</div>`;
+      small !== '' ? `<span class="cal-sub">${small}</span>` : ''}${mark}</div>${c.items.map(chip).join('')}${c.plans.map(planChip).join('')}${
+      dots.length ? `<div class="cal-dots">${dots.join('')}</div>` : ''}</div>`;
   };
   const agenda = mo => {
-    const rows = mo.weeks.flat().filter(c => c && c.items.length).map(c => `<li><strong>${fmtDate(ts(c.date), { weekday: 'short', month: 'short', day: 'numeric' })}${
-      c.day === null ? '' : ` · day ${c.day}`}</strong><ul>${c.items.map(it => `<li><span class="cal-dot${it.n < it.eligible ? ' partial' : ''}" style="--c:${
-      color(it.key)}"></span>${escapeHtml(cageName(d, it.key))}: ${escapeHtml(doseText(it))} · ${it.n}/${it.eligible} mice</li>`).join('')}</ul></li>`).join('');
+    const rows = mo.weeks.flat().filter(c => c && (c.items.length || c.plans.length)).map(c => `<li><strong>${
+      fmtDate(ts(c.date), { weekday: 'short', month: 'short', day: 'numeric' })}${c.day === null ? '' : ` · day ${c.day}`}</strong><ul>${
+      c.items.map(it => `<li>${dot(it.key, it.n < it.eligible ? 'partial' : '')}${escapeHtml(cageName(d, it.key))}: ${escapeHtml(doseText(it))} · ${it.n}/${it.eligible} mice</li>`).join('')}${
+      c.plans.map(p => `<li class="${p.status}">${dot(p.key, `plan ${p.status}`)}${p.status === 'missed' ? 'Missed: ' : 'Planned: '}${escapeHtml(cageName(d, p.key))}: ${
+        escapeHtml(doseText(p))} · ${p.mice.map(escapeHtml).join(', ')}</li>`).join('')}</ul></li>`).join('');
     return rows ? `<ul class="cal-agenda">${rows}</ul>` : '';
   };
   const body = months.map(mo => `<div class="cal-month"><h3>${fmtDate(Date.UTC(mo.year, mo.month, 1), { month: 'long', year: 'numeric' })}</h3>`
@@ -1606,40 +2080,106 @@ function renderDoseCalendar(root, d) {
   sec.insertAdjacentHTML('beforeend', `<div class="table-wrap cal-wrap">${body}</div>`);
   root.appendChild(sec);
   state.views['dose-calendar'].rows = () => [
-    ['date', 'study_day', d.unit, 'drug', 'dose', 'volume_ul', 'route', 'mice_dosed', 'mice_in_group', 'mouse_ids'],
-    ...doseDays.flatMap(c => c.items.map(it => [c.date, c.day, cageText(d, it.key), it.drug, it.dose, it.volume, it.route, it.n, it.eligible, it.mice.join(' ')])),
+    ['date', 'study_day', d.unit, 'status', 'drug', 'dose', 'volume_ul', 'route', 'mice', 'mice_in_group', 'mouse_ids'],
+    ...cells.filter(c => c.items.length || c.plans.length).flatMap(c => [
+      ...c.items.map(it => [c.date, c.day, cageText(d, it.key), 'given', it.drug, it.dose, it.volume, it.route, it.n, it.eligible, it.mice.join(' ')]),
+      ...c.plans.map(p => [c.date, c.day, cageText(d, p.key), p.status, p.drug, p.dose, p.volume, p.route, p.n, '', p.mice.join(' ')]),
+    ]),
+  ];
+}
+
+// What to do on each of the next 7 days from the schedule: measurement days (Groups sheet cadence) and the doses
+// planned from each mouse's start (Regimens Days), with the cage and tail mark to find the mouse. Below it, doses
+// planned since the latest data that are not entered yet, missed doses and doses off the schedule.
+function renderSchedule(root, d) {
+  if (!d.hasSchedule) return;
+  const shown = shownCages(d);
+  const mice = d.mice.filter(m => shown.includes(m.cage));
+  const byId = new Map(mice.map(m => [m.id, m]));
+  const today = localToday();
+  const days = 7;
+  const end = addDays(today, days - 1);
+  const week = upcomingWork(mice, shown, today, days, measureDates(d.cadence, d.latestDate, today, end));
+  const alive = mice.filter(m => !m.ended).length;
+  const where = id => { const m = byId.get(id); return m ? placeText(realCage(m), m.mouse) : ''; };
+  const mouseList = ids => ids.map(id => `<span class="sched-mouse" data-mouse-ref="${escapeHtml(id)}">${escapeHtml(id)} <span class="where">${escapeHtml(where(id))}</span></span>`).join('');
+  const doseLine = x => `<li><span class="cal-dot" style="--c:${seriesVar(d.cages.indexOf(x.key))}"></span><strong>${escapeHtml(cageName(d, x.key))}</strong>: ${
+    escapeHtml(doseText(x))} · ${x.mice.length} ${x.mice.length > 1 ? 'mice' : 'mouse'}<div class="sched-mice">${mouseList(x.mice)}</div></li>`;
+  const dayBlock = u => `<li class="sched-day${u.date === today ? ' today' : ''}"><h3>${u.date === today ? 'Today, ' : ''}${
+    fmtDate(ts(u.date), { weekday: 'short', month: 'short', day: 'numeric' })}</h3><ul>${
+    u.measure ? `<li class="sched-measure">○ Weigh and measure tumors · ${alive} mice</li>` : ''}${u.doses.map(doseLine).join('')}${
+    !u.measure && !u.doses.length ? '<li class="sched-none">Nothing scheduled</li>' : ''}</ul></li>`;
+  const late = mice.flatMap(m => m.planned.filter(p => p.status === 'planned' && p.date < today).map(p => ({ m, p })));
+  const missed = mice.flatMap(m => m.planned.filter(p => p.status === 'missed').map(p => ({ m, p })));
+  const off = mice.flatMap(m => m.offSchedule.map(i => ({ m, i })));
+  const row = (m, date, text) => `<li><strong>${fmtDate(ts(date))}</strong> · ${escapeHtml(m.id)} <span class="where">${
+    escapeHtml(placeText(realCage(m), m.mouse))}</span> · ${escapeHtml(text)}</li>`;
+  const section = (cls, title, items) => (items.length ? `<div class="sched-list ${cls}"><h3>${title}</h3><ul>${items.join('')}</ul></div>` : '');
+  const lists = [
+    section('late', `Planned since the latest data (${fmtDate(ts(d.cutoff))}), not entered yet`, late.map(({ m, p }) => row(m, p.date, `${doseText(p)} (day ${p.day})`))),
+    section('missed', `Missed: planned, no Injections row`, missed.map(({ m, p }) => row(m, p.date, `${doseText(p)} (day ${p.day})`))),
+    section('off', 'Off schedule', off.map(({ m, i }) => row(m, i.date, `${doseText(i)} · ${i.reason === 'no-start'
+      ? 'given before the mouse has a treatment start' : `day ${i.day}, not a planned day for ${i.drug}`}`))),
+  ].join('');
+  const every = d.cadence ? ` Measured every ${d.cadence.every} day${d.cadence.every > 1 ? 's' : ''}.` : '';
+  const sub = `The next ${days} days from the schedule: doses from each mouse’s treatment start (Regimens Days).${every}`
+    + `${missed.length ? ` ${missed.length} missed dose${missed.length > 1 ? 's' : ''}.` : ''}`;
+  const sec = card('schedule', 'Coming up', sub, TABLE_TOOLS, { hint: 'Mice not yet started are not listed.' });
+  sec.insertAdjacentHTML('beforeend', `<div class="sched"><ol class="sched-week">${week.map(dayBlock).join('')}</ol>${lists}</div>`);
+  root.appendChild(sec);
+  const place = id => { const m = byId.get(id); return m ? [realCage(m), m.mouse] : ['', '']; };
+  const groupOfKey = k => cageText(d, k);
+  state.views.schedule.rows = () => [
+    ['date', 'what', d.unit, 'drug', 'dose', 'volume_ul', 'route', 'mouse', 'cage', 'tail_mark', 'treatment_day', 'note'],
+    ...week.flatMap(u => [
+      ...(u.measure ? [[u.date, 'measure', '', '', '', '', '', '', '', '', '', `${alive} mice`]] : []),
+      ...u.doses.flatMap(x => x.mice.map(id => [u.date, 'dose', groupOfKey(x.key), x.drug, x.dose, x.volume, x.route, id, ...place(id),
+        daysBetween(byId.get(id).start, u.date), ''])),
+    ]),
+    ...late.map(({ m, p }) => [p.date, 'not entered', groupOfKey(m.cage), p.drug, p.dose, p.volume, p.route, m.id, realCage(m), m.mouse, p.day, '']),
+    ...missed.map(({ m, p }) => [p.date, 'missed', groupOfKey(m.cage), p.drug, p.dose, p.volume, p.route, m.id, realCage(m), m.mouse, p.day, '']),
+    ...off.map(({ m, i }) => [i.date, 'off schedule', groupOfKey(m.cage), i.drug, i.dose, i.volume, i.route, m.id, realCage(m), m.mouse, i.day ?? '',
+      i.reason === 'no-start' ? 'no treatment start' : 'not a planned day']),
   ];
 }
 
 // Kaplan–Meier curve per cage or group: share of mice that have not died or reached a humane endpoint.
 function renderSurvival(root, t, d) {
+  const treat = treatMode();
   const shown = shownCages(d);
-  const curves = survival(d.mice, d.cages, d.dates);
+  const curves = treat ? survivalFromStart(d.mice, d.cages, d.latestDate) : survival(d.mice, d.cages, d.dates);
   const ended = d.mice.filter(m => shown.includes(m.cage) && m.ended).length;
   const lanes = doseLanes(t, d, shown);
+  const left = treat ? d.mice.filter(m => shown.includes(m.cage) && !(m.start && (!m.ended || m.endDate >= m.start))).length : 0;
   const sub = `Kaplan–Meier. Found dead or euthanized at an endpoint ends the line; euthanized at end of study or removed is censored.${
-    ended ? '' : ' No mouse has ended yet.'}${lanes.length ? ` ${DOSE_KEY}.` : ''}`;
+    ended ? '' : ' No mouse has ended yet.'}${treat ? ' Counted from each mouse’s treatment start.' : ''}${
+    left ? ` ${left} ${left > 1 ? 'mice' : 'mouse'} with no treatment start, or ended before it, ${left > 1 ? 'are' : 'is'} left out.` : ''}${
+    lanes.length ? ` ${DOSE_KEY}.` : ''}`;
   const sec = card('survival', `Survival by ${d.unit}`, sub, CHART_TOOLS, { hint: `Click a ${d.unit} in the legend to hide it.` });
   root.appendChild(sec);
-  state.views.survival.rows = () => [
+  state.views.survival.rows = () => (treat ? [
+    [d.unit, 'treatment_day', 'surviving_pct', 'at_risk', 'events'],
+    ...curves.filter(c => shown.includes(c.key)).flatMap(c => c.points.map(p => [cageText(d, c.key), p.day, num(p.s * 100), p.atRisk, p.events])),
+  ] : [
     [d.unit, 'date', 'study_day', 'surviving_pct', 'at_risk', 'events'],
     ...curves.filter(c => shown.includes(c.key)).flatMap(c => c.points.map(p =>
-      [cageText(d, c.key), p.date, Math.round((ts(p.date) - ts(d.dates[0])) / DAY), num(p.s * 100), p.atRisk, p.events])),
-  ];
+      [cageText(d, c.key), p.date, daysBetween(d.dates[0], p.date), num(p.s * 100), p.atRisk, p.events])),
+  ]);
   const n = curves.length;
   const datasets = curves.map((c, k) => {
     const { color, dash } = seriesStyle(t, k);
     const nudge = (k - (n - 1) / 2) * 0.6; // keep overlapping 100% lines apart
     return {
       label: cageName(d, c.key), cage: c.key, hidden: !shown.includes(c.key),
-      data: c.points.map(p => ({ x: xOfDate(d, p.date), y: p.s * 100 + nudge, s: p.s, date: p.date,
-        day: Math.round((ts(p.date) - ts(d.dates[0])) / DAY), atRisk: p.atRisk, events: p.events })),
+      data: c.points.map(p => (treat
+        ? { x: p.day, y: p.s * 100 + nudge, s: p.s, tday: p.day, atRisk: p.atRisk, events: p.events }
+        : { x: xOfDate(d, p.date), y: p.s * 100 + nudge, s: p.s, date: p.date, day: daysBetween(d.dates[0], p.date), atRisk: p.atRisk, events: p.events })),
       stepped: true, borderColor: color, backgroundColor: color, borderDash: dash, borderWidth: 2,
       pointRadius: c.points.map(p => (p.events ? 4 : 0)), pointHoverRadius: 5, pointBorderColor: t.surface, pointBorderWidth: 1.5,
     };
   });
   const opts = chartOptions(t, d, 'pct');
-  addDoses(opts, t, d, lanes, curves.flatMap(c => c.points.map(p => p.date)));
+  addDoses(opts, t, d, lanes, curves.flatMap(c => c.points.map(p => (treat ? p.day : xOfDate(d, p.date)))));
   opts.scales.y = {
     type: 'linear', min: 0, max: 105,
     title: { display: true, text: 'Surviving (%)', color: t.ink2 },
@@ -1667,6 +2207,8 @@ function renderKpis(d) {
     [count('loss-warning'), '⚠ lost 15–20%', 'warning'],
     [count('ended'), '✕ ended', 'ended'],
     [count('missing'), '○ missing latest', 'missing'],
+    ...(d.hasSchedule ? [[d.mice.filter(m => shown.includes(m.cage)).reduce((k, m) => k + m.planned.filter(p => p.status === 'missed').length, 0),
+      '✕ missed doses', 'critical']] : []),
   ];
   box.innerHTML = tiles.map(([value, label, cls]) =>
     `<div class="kpi${cls && value ? ` ${cls}` : ''}"><span class="kpi-value">${value}</span><span class="kpi-label">${label}</span></div>`).join('');
@@ -1699,6 +2241,7 @@ function renderViews() {
   renderSurvival(root, t, d);
   renderLatestTable(root, d);
   renderHeatmap(root, d);
+  renderSchedule(root, d);
   renderDoseCalendar(root, d);
   renderDoses(root, d);
   renderJump();
@@ -1713,6 +2256,7 @@ const JUMP = [
   [['survival'], 'Survival'],
   [['table'], 'Latest values'],
   [['grid'], 'All measurements'],
+  [['schedule'], 'Coming up'],
   [['dose-calendar', 'doses'], 'Injections'],
 ];
 
@@ -1788,7 +2332,10 @@ function renderToolbar(d) {
     ${segControl('tumor', 'Tumor', [['volume', 'Volume'], ['rtv', 'Relative', 'Each mouse’s volume ÷ its first measured volume']])}
     ${segControl('scale', 'Tumor axis', [['linear', 'Linear'], ['log', 'Log']])}
     ${segControl('error', 'Error bars', [['sem', 'SEM'], ['sd', 'SD'], ['none', 'None']])}
-    ${segControl('x', 'X axis', [['date', 'Date'], ['day', 'Day', 'Study day: days since the first session']])}
+    ${segControl('x', 'X axis', [['date', 'Date'], ['day', 'Day', 'Study day: days since the first session'],
+      ...(hasStarts() ? [['treat', 'From start', 'Days from each mouse’s treatment start (its own on the Mice sheet, else its group’s); day 0 lines the mice up']] : [])])}
+    ${hasStarts() ? segControl('base', 'Change from', [['first', 'First value', 'Weight % change and relative tumor volume from each mouse’s first measurement'],
+      ['start', 'Treatment start', 'Weight % change and relative tumor volume from the last value on or before each mouse’s treatment start']]) : ''}
     <label class="seg"><span class="seg-label">Highlight</span><select id="focus-mouse"><option value="">No mouse</option>${mice}</select></label>
     ${segControl('theme', 'Theme', [['auto', 'Auto'], ['light', 'Light'], ['dark', 'Dark']])}
     <div class="seg" role="group" aria-label="Export"><span class="seg-label">Export</span><div class="seg-buttons">
@@ -1805,7 +2352,7 @@ function syncToolbar() {
   const d = state.derived;
   if (!d) return;
   const shown = shownCages(d);
-  const current = key => (key === 'by' ? effectiveBy() : state.prefs[key]);
+  const current = key => (key === 'by' ? effectiveBy() : key === 'x' ? effX() : key === 'base' ? effBase() : state.prefs[key]);
   bar.querySelectorAll('[data-pref]').forEach(b => b.setAttribute('aria-pressed', String(current(b.dataset.pref) === b.dataset.value)));
   bar.querySelectorAll('[data-cage]').forEach(b => b.setAttribute('aria-pressed', String(shown.includes(b.dataset.cage))));
   const all = bar.querySelector('[data-cage-all]');
@@ -1825,7 +2372,7 @@ function setPref(key, value) {
   state.prefs[key] = value;
   savePrefs();
   if (key === 'theme') applyTheme();
-  if (key === 'by') { refresh(); return; }
+  if (key === 'by' || key === 'base') { refresh(); return; }
   syncToolbar();
   renderViews();
 }
@@ -1840,12 +2387,13 @@ function effectiveBy() {
   return hasStudyGroups() ? 'group' : 'cage';
 }
 
-/** The view data: by current cage, or re-keyed by the workbook's groups or the user's own. */
+/** The view data: by current cage, or re-keyed by the workbook's groups or the user's own; from treatment start if set. */
 function viewData() {
   const by = effectiveBy();
-  if (by === 'group') return applyGroups(state.base, studyGrouping(state.base));
-  if (by === 'mine') return applyGroups(state.base, state.grouping);
-  return state.base;
+  const base = effBase() === 'start' ? rebase(state.base) : state.base;
+  if (by === 'group') return applyGroups(base, studyGrouping(base));
+  if (by === 'mine') return applyGroups(base, state.grouping);
+  return base;
 }
 
 /** Rebuild the view data and redraw the toolbar, views and groups panel. */
@@ -2277,11 +2825,16 @@ function allDataRows() {
   const d = state.base;
   const mine = hasGroups() ? [m => { const id = groupOf(state.grouping, m.id); return id === UNGROUPED ? '' : groupLabel(state.grouping, id); }] : [];
   const study = hasStudyGroups();
+  const starts = d.hasStarts;
   return [
-    ['mouse', 'current_cage', 'current_tail_mark', ...(study ? ['group'] : []), ...(mine.length ? ['my_group'] : []), 'status', 'end_date', 'end_reason',
-      'date', 'study_day', 'cage', 'tail_mark', 'weight_g', 'weight_pct_change', 'tumor_length', 'tumor_breadth', 'tumor_volume', 'relative_tumor_volume', 'note'],
-    ...d.mice.flatMap(m => m.points.map(p => [m.id, m.cage, m.mouse, ...(study ? [m.group] : []), ...mine.map(f => f(m)), m.status, m.endDate, m.endReason,
-      p.date, p.day, p.cage, p.mark, p.weight, num(p.pct), p.length, p.breadth, num(p.volume), num(p.rtv), p.note])),
+    ['mouse', 'current_cage', 'current_tail_mark', ...(study ? ['group'] : []), ...(mine.length ? ['my_group'] : []),
+      ...(starts ? ['treatment_start'] : []), 'status', 'end_date', 'end_reason', 'date', 'study_day', ...(starts ? ['treatment_day'] : []),
+      'cage', 'tail_mark', 'weight_g', 'weight_pct_change', ...(starts ? ['weight_pct_change_from_start'] : []),
+      'tumor_length', 'tumor_breadth', 'tumor_volume', 'relative_tumor_volume', ...(starts ? ['relative_tumor_volume_from_start'] : []), 'note'],
+    ...d.mice.flatMap(m => m.points.map(p => [m.id, m.cage, m.mouse, ...(study ? [m.group] : []), ...mine.map(f => f(m)),
+      ...(starts ? [m.start] : []), m.status, m.endDate, m.endReason, p.date, p.day, ...(starts ? [p.tday] : []),
+      p.cage, p.mark, p.weight, num(p.pct), ...(starts ? [num(p.pctStart)] : []),
+      p.length, p.breadth, num(p.volume), num(p.rtv), ...(starts ? [num(p.rtvStart)] : []), p.note])),
   ];
 }
 
@@ -2364,7 +2917,7 @@ function show(parsed, name, savedAt) {
       : `<strong>${escapeHtml(name)}</strong> has no measurement sessions. Each session starts with a heading like <code>## 2026-11-05</code> followed by the measurement table.`);
     return false;
   }
-  const derived = derive(parsed);
+  const derived = derive(parsed, { today: localToday() });
   if (name !== state.name) state.selected = new Set();
   state.base = derived;
   state.parsed = parsed;
@@ -2562,6 +3115,7 @@ if (typeof document !== 'undefined') {
 if (typeof module === 'object' && module.exports) {
   module.exports = {
     parseNote, parseWorkbook, readWorkbookSheets, derive, summarize, tumorVolume, cleanGrouping, applyGroups, distribute, groupLabel,
-    studyGrouping, survival, dosesByKey, doseCalendar, UNGROUPED,
+    studyGrouping, survival, dosesByKey, doseCalendar, UNGROUPED, rebase, summarizeByTreatDay, survivalFromStart, dosesByTreatDay,
+    measureDates, upcomingWork, addDays,
   };
 }

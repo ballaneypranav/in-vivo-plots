@@ -299,6 +299,10 @@ tr.focused th { background: var(--accent-wash); box-shadow: inset 4px 0 0 var(--
 .cal-agenda > li + li { margin-top: 6px; }
 .cal-agenda ul { list-style: none; margin: 2px 0 0; padding: 0; color: var(--ink-2); }
 .cal-agenda ul .cal-dot { display: inline-block; margin-right: 6px; }
+/* Planned doses (Regimens schedule) not given: dotted; missed ones in red. */
+.cal-dot.plan { background: transparent; box-shadow: none; border: 1.5px dotted var(--c); }
+.cal-dot.plan.missed { border: 2px solid var(--critical); }
+.cal-agenda li.missed { color: var(--critical); }
 @media (min-width: 700px) {
   .cal-cell { min-height: 96px; padding: 4px 6px; }
   .cal-num { font-size: 0.9rem; }
@@ -310,11 +314,35 @@ tr.focused th { background: var(--accent-wash); box-shadow: inset 4px 0 0 var(--
   }
   .cal-item.partial { background: transparent; border: 1px dashed var(--c); border-left-width: 3px; }
   .cal-item.mine { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .cal-item.plan { background: transparent; border: 1px dotted var(--c); border-left: 3px dotted var(--c); color: var(--ink-2); }
+  .cal-item.plan.missed { border: 1px solid var(--critical); border-left: 3px solid var(--critical); background: var(--critical-wash); color: var(--ink); }
+  .cal-item.plan.missed .cal-n { color: var(--critical); font-weight: 600; }
   .cal-drug { font-weight: 600; }
   .cal-key { color: var(--ink-2); }
   .cal-n { font-variant-numeric: tabular-nums; color: var(--ink-2); }
   .cal-dots, .cal-agenda { display: none; }
 }
+
+/* Coming up: the next 7 days of the schedule. A list on a phone, a row of day columns from 1000px. */
+.sched-week { list-style: none; margin: 4px 0 0; padding: 0; display: grid; gap: 8px; }
+.sched-day { border: 1px solid var(--grid); border-radius: 8px; padding: 6px 8px; min-width: 0; }
+.sched-day.today { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.sched-day h3 { margin: 0 0 4px; font-size: 0.85rem; }
+.sched-day ul, .sched-list ul { list-style: none; margin: 0; padding: 0; font-size: 0.8rem; }
+.sched-day li + li { margin-top: 6px; }
+.sched-day .cal-dot { display: inline-block; margin-right: 5px; vertical-align: baseline; }
+.sched-measure { font-weight: 600; }
+.sched-none { color: var(--muted); }
+.sched-mice { display: flex; flex-wrap: wrap; gap: 2px 8px; margin-top: 2px; color: var(--ink-2); }
+.sched-mouse { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.sched .where { color: var(--muted); }
+.sched-list { margin-top: 10px; }
+.sched-list h3 { margin: 0 0 4px; font-size: 0.85rem; }
+.sched-list li + li { margin-top: 3px; }
+.sched-list.missed h3 { color: var(--critical); }
+.sched-list.off h3 { color: var(--ink-2); }
+@media (min-width: 700px) { .sched-week { grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); } }
+@media (min-width: 1500px) { .sched-week { grid-template-columns: repeat(7, minmax(0, 1fr)); } }
 
 footer { color: var(--muted); font-size: 0.8rem; text-align: center; padding: 24px 0 0; }
 
@@ -434,7 +462,7 @@ body.panel-open::before { content: ""; position: fixed; inset: 0; background: va
   #weight-group { grid-area: wg; } #weight-mice { grid-area: wi; } #weight-latest { grid-area: wl; }
   #tumor-group { grid-area: tg; } #tumor-mice { grid-area: ti; } #tumor-latest { grid-area: tl; }
   #table { grid-area: tab; } #grid { grid-area: grid; }
-  #doses, #dose-calendar { grid-column: 1 / -1; }
+  #schedule, #doses, #dose-calendar { grid-column: 1 / -1; }
 }
 @media (min-width: 1000px) {
   .group-panel {
@@ -462,7 +490,7 @@ body.panel-open::before { content: ""; position: fixed; inset: 0; background: va
   body.panel-open::before { display: none; }
   #views { display: grid; grid-template-columns: 1fr 1fr; grid-template-areas: none; gap: 8px; }
   #views > section { grid-area: auto; break-inside: avoid; }
-  #table, #grid, #doses, #dose-calendar { grid-column: 1 / -1; }
+  #table, #grid, #schedule, #doses, #dose-calendar { grid-column: 1 / -1; }
   .card .table-wrap { max-height: none; overflow: visible; }
   #views { grid-template-rows: none; }
   .chart, .chart-card .chart { height: 260px; flex: none; }
