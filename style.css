@@ -202,6 +202,14 @@ button:focus-visible, select:focus-visible, tr:focus-visible { outline: 2px soli
   background: transparent; color: var(--ink); font: inherit; font-size: 0.85rem; cursor: pointer; white-space: nowrap;
 }
 .menu-list button:hover, .menu-list button:focus-visible { background: var(--accent-wash); outline: none; }
+/* Plots menu: a checkbox per chart, the menu stays open while ticking. */
+.menu-check {
+  display: flex; align-items: center; gap: 8px; min-height: 36px; padding: 0 10px; border-radius: 6px;
+  color: var(--ink); font-size: 0.85rem; cursor: pointer; white-space: nowrap;
+}
+.menu-check:hover, .menu-check:focus-within { background: var(--accent-wash); }
+.menu-check input { margin: 0; accent-color: var(--accent); }
+.plots-menu .menu-list { left: 0; right: auto; }
 @media (max-width: 699px) { .menu-list { left: 0; right: auto; } }
 
 /* Jump bar: sticks to the top of the screen, one link per topic, the topic in view marked. Scrolls
@@ -516,8 +524,9 @@ body.panel-open::before { content: ""; position: fixed; inset: 0; background: va
   #views {
     --row-h: max(300px, calc((100vh - var(--top, 190px) - 14px - 16px) / 2));
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    grid-template-rows: repeat(4, var(--row-h)) calc(var(--row-h) * 1.4) auto;
-    grid-template-areas: "wg wi" "wl wl" "tg ti" "tl tl" "surv tab" "grid grid";
+    /* app.js (layoutViews) sets --areas-2 / --rows-2 to leave out the cards that aren't on the page. */
+    grid-template-rows: var(--rows-2, repeat(4, var(--row-h)) calc(var(--row-h) * 1.4) auto);
+    grid-template-areas: var(--areas-2, "wg wi" "wl wl" "tg ti" "tl tl" "surv tab" "grid grid");
   }
   /* Survival and the latest-values table share a fixed-height row; the table scrolls inside its card. */
   #table { display: flex; flex-direction: column; }
@@ -545,8 +554,8 @@ body.panel-open::before { content: ""; position: fixed; inset: 0; background: va
 @media (min-width: 1500px) {
   #views {
     grid-template-columns: repeat(6, minmax(0, 1fr));
-    grid-template-rows: repeat(2, var(--row-h)) calc(var(--row-h) * 1.4) auto;
-    grid-template-areas: "wg wg wi wi wl wl" "tg tg ti ti tl tl" "surv surv tab tab tab tab" "grid grid grid grid grid grid";
+    grid-template-rows: var(--rows-6, repeat(2, var(--row-h)) calc(var(--row-h) * 1.4) auto);
+    grid-template-areas: var(--areas-6, "wg wg wi wi wl wl" "tg tg ti ti tl tl" "surv surv tab tab tab tab" "grid grid grid grid grid grid");
   }
 }
 /* Short desktop screens (1366×768): two chart rows can't fit, so give each chart room to read. Up to 900 px tall

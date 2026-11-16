@@ -1115,6 +1115,9 @@ const PREF_VALUES = {
   slideBg: ['light', 'dark', 'none'],
   slideTitle: ['off', 'on'],
 };
+// The chart cards, in page order, and the ones hidden until the Plots menu shows them: the per-mouse bars have no time axis.
+const CHART_IDS = ['weight-group', 'weight-mice', 'weight-latest', 'tumor-group', 'tumor-mice', 'tumor-latest', 'survival'];
+const HIDDEN_VIEWS = ['weight-latest', 'tumor-latest'];
 const SORT_KEYS = ['id', 'where', 'start', 'tday', 'weight', 'pct', 'volume', 'rtv', 'flags'];
 
 function loadPrefs() {
@@ -1123,6 +1126,7 @@ function loadPrefs() {
   const prefs = {};
   for (const [k, vals] of Object.entries(PREF_VALUES)) prefs[k] = vals.includes(saved[k]) ? saved[k] : vals[0];
   for (const k of ['hidden', 'hiddenGroups']) prefs[k] = Array.isArray(saved[k]) ? saved[k].filter(c => typeof c === 'string') : [];
+  prefs.hiddenViews = Array.isArray(saved.hiddenViews) ? saved.hiddenViews.filter(id => CHART_IDS.includes(id)) : [...HIDDEN_VIEWS];
   const s = saved.sort || {};
   prefs.sort = { key: SORT_KEYS.includes(s.key) ? s.key : 'id', dir: s.dir === -1 ? -1 : 1 };
   return prefs;
@@ -2358,23 +2362,83 @@ function renderViews() {
   Chart.defaults.font.size = state.chartFont = chartFont();
   Chart.defaults.color = t.ink2;
   const charts = chartRenderers(d);
-  CHART_IDS.forEach(id => charts[id](root, t));
+  CHART_IDS.filter(id => !state.prefs.hiddenViews.includes(id)).forEach(id => charts[id](root, t));
   renderLatestTable(root, d);
   renderHeatmap(root, d);
   renderSchedule(root, d);
   renderDoseCalendar(root, d);
   renderDoses(root, d);
+  layoutViews(root);
   renderJump();
   document.querySelectorAll('#views .card-controls').forEach(syncControls);
   setTop();
+}
+
+/* -------------------------------------------------------- dashboard grid */
+
+// The dashboard rows on wide screens (style.css), each a list of [card id, area, columns]. Two columns from 1000 px,
+// six from 1500 px. Cards not on the page (hidden in the Plots menu, or with nothing to show) are left out: the
+// others in their row share its width, and an empty row goes, so no gap is left.
+const GRID_LAYOUTS = {
+  2: [
+    [[['weight-group', 'wg', 1], ['weight-mice', 'wi', 1]], 'var(--row-h)'],
+    [[['weight-latest', 'wl', 2]], 'var(--row-h)'],
+    [[['tumor-group', 'tg', 1], ['tumor-mice', 'ti', 1]], 'var(--row-h)'],
+    [[['tumor-latest', 'tl', 2]], 'var(--row-h)'],
+    [[['survival', 'surv', 1], ['table', 'tab', 1]], 'calc(var(--row-h) * 1.4)'],
+    [[['grid', 'grid', 2]], 'auto'],
+  ],
+  6: [
+    [[['weight-group', 'wg', 2], ['weight-mice', 'wi', 2], ['weight-latest', 'wl', 2]], 'var(--row-h)'],
+    [[['tumor-group', 'tg', 2], ['tumor-mice', 'ti', 2], ['tumor-latest', 'tl', 2]], 'var(--row-h)'],
+    [[['survival', 'surv', 2], ['table', 'tab', 4]], 'calc(var(--row-h) * 1.4)'],
+    [[['grid', 'grid', 6]], 'auto'],
+  ],
+};
+
+/** grid-template-areas and -rows for `cols` columns with the cards in `present`. */
+function gridTemplate(cols, present) {
+  const rows = [];
+  for (const [cells, height] of GRID_LAYOUTS[cols]) {
+    const shown = cells.filter(([id]) => present.includes(id));
+    if (!shown.length) continue;
+    const total = shown.reduce((n, c) => n + c[2], 0);
+    let left = cols;
+    const names = shown.flatMap(([, area, w], i) => {
+      const n = i === shown.length - 1 ? left : Math.round((w / total) * cols);
+      left -= n;
+      return Array(n).fill(area);
+    });
+    rows.push([`"${names.join(' ')}"`, height]);
+  }
+  return { areas: rows.map(r => r[0]).join(' ') || 'none', rows: rows.map(r => r[1]).join(' ') || 'none' };
+}
+
+/** Fit the wide-screen grid to the cards on the page (custom properties, so the print layout still wins). */
+function layoutViews(root) {
+  const present = [...root.children].map(el => el.id);
+  for (const cols of [2, 6]) {
+    const g = gridTemplate(cols, present);
+    root.style.setProperty(`--areas-${cols}`, g.areas);
+    root.style.setProperty(`--rows-${cols}`, g.rows);
+  }
+}
+
+/** Show or hide chart cards (the Plots menu). */
+function setHiddenViews(hidden) {
+  state.prefs.hiddenViews = CHART_IDS.filter(id => hidden.includes(id));
+  if (state.expanded && state.prefs.hiddenViews.includes(state.expanded)) state.expanded = null;
+  savePrefs();
+  syncToolbar();
+  renderViews();
 }
 
 /* ------------------------------------------------------------- jump bar */
 
 // One link per topic, in page order, to the topic's first card present. A topic with no card is left out.
 const JUMP = [
-  [['weight-group'], 'Weight'],
-  [['tumor-group'], 'Tumor'],
+  [['weight-group', 'weight-mice', 'weight-latest'], 'Weight'],
+  [['tumor-group', 'tumor-mice', 'tumor-latest'], 'Tumor'],
   [['survival'], 'Survival'],
   [['table'], 'Latest values'],
   [['grid'], 'All measurements'],
@@ -2506,6 +2570,7 @@ function renderToolbar(d) {
     ${c.base}
     ${c.focus}
     <div class="seg"><span class="seg-label">Theme</span><button type="button" class="chip" data-pref="theme" data-cycle title="Switch between following the device, light and dark"></button></div>
+    ${plotsMenu(d)}
     <details class="menu seg"><summary class="chip">Export</summary><div class="menu-list" role="group" aria-label="Export">
       <button type="button" data-export="slide" title="Body weight and tumor volume by ${d.unit}, side by side, as a 16:9 slide image">Slide: weight + tumor</button>
       <button type="button" data-export="png" title="All the charts in one PNG image">Dashboard image</button>
@@ -2514,6 +2579,18 @@ function renderToolbar(d) {
     </div>`;
   bar.hidden = false;
   syncToolbar();
+}
+
+/** The Plots menu: a checkbox per chart card. */
+function plotsMenu(d) {
+  const by = d.unit;
+  const names = {
+    'weight-group': `Weight by ${by}`, 'weight-mice': 'Weight, each mouse over time', 'weight-latest': 'Weight per mouse, latest (bars)',
+    'tumor-group': `Tumor by ${by}`, 'tumor-mice': 'Tumor, each mouse over time', 'tumor-latest': 'Tumor per mouse, latest (bars)',
+    survival: `Survival by ${by}`,
+  };
+  return `<details class="menu seg plots-menu"><summary class="chip" title="Choose the charts to show">Plots</summary><div class="menu-list" role="group" aria-label="Plots">${
+    CHART_IDS.map(id => `<label class="menu-check"><input type="checkbox" data-view="${id}"> ${names[id]}</label>`).join('')}</div></details>`;
 }
 
 function syncToolbar() {
@@ -2539,6 +2616,7 @@ function syncControls(bar) {
   const all = bar.querySelector('[data-cage-all]');
   if (all) all.setAttribute('aria-pressed', String(shown.length === d.cages.length));
   bar.querySelectorAll('[data-focus-select]').forEach(sel => { sel.value = state.focus || ''; });
+  bar.querySelectorAll('[data-view]').forEach(box => { box.checked = !state.prefs.hiddenViews.includes(box.dataset.view); });
   bar.classList.toggle('open', state.moreSettings);
   const more = bar.querySelector('[data-more-settings]');
   if (more) {
@@ -2971,7 +3049,6 @@ function chartFigure(id, scale = 3) {
   }
 }
 
-const CHART_IDS = ['weight-group', 'weight-mice', 'weight-latest', 'tumor-group', 'tumor-mice', 'tumor-latest', 'survival'];
 
 /** Every chart in one image, three per row: weight on top, tumor below. */
 function dashboardFigure(scale = 2) {
@@ -3520,6 +3597,10 @@ function init() {
     if (e.target.closest && e.target.closest('#group-panel')) { panelChange(e); return; }
     if (e.target.dataset.focusSelect !== undefined) setFocus(e.target.value);
     else if (e.target.dataset.prefSelect) setPref(e.target.dataset.prefSelect, e.target.value);
+    else if (e.target.dataset.view) {
+      const hidden = state.prefs.hiddenViews.filter(id => id !== e.target.dataset.view);
+      setHiddenViews(e.target.checked ? hidden : [...hidden, e.target.dataset.view]);
+    }
   });
   document.addEventListener('input', e => { if (e.target.closest && e.target.closest('#group-panel')) panelInput(e); });
   document.addEventListener('keydown', e => {
@@ -3585,6 +3666,6 @@ if (typeof module === 'object' && module.exports) {
   module.exports = {
     parseNote, parseWorkbook, readWorkbookSheets, derive, summarize, tumorVolume, cleanGrouping, applyGroups, distribute, groupLabel,
     studyGrouping, survival, dosesByKey, doseCalendar, UNGROUPED, rebase, summarizeByTreatDay, survivalFromStart, dosesByTreatDay,
-    measureDates, upcomingWork, addDays,
+    measureDates, upcomingWork, addDays, gridTemplate, CHART_IDS, HIDDEN_VIEWS,
   };
 }

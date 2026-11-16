@@ -8,7 +8,7 @@ const path = require('node:path');
 const {
   parseNote, parseWorkbook, readWorkbookSheets, derive, summarize, tumorVolume, cleanGrouping, applyGroups, distribute, groupLabel,
   studyGrouping, survival, dosesByKey, doseCalendar, UNGROUPED, rebase, summarizeByTreatDay, survivalFromStart, dosesByTreatDay,
-  measureDates, upcomingWork,
+  measureDates, upcomingWork, gridTemplate, CHART_IDS, HIDDEN_VIEWS,
 } = require('./app.js');
 
 const demo = fs.readFileSync(path.join(__dirname, 'demo', 'synthetic-demo.md'), 'utf8');
@@ -656,4 +656,21 @@ test('workbook: staggered starts, Regimens schedule, measurement cadence, binnin
   ]);
   assert.equal(bad.cadence, null);
   assert.deepEqual(derive(parseWorkbook({ Measurements: sheets.Measurements })).hasSchedule, false);
+});
+
+test('dashboard grid: every card gives the full layout; hidden cards leave no gap', () => {
+  const all = [...CHART_IDS, 'table', 'grid'];
+  assert.deepEqual(gridTemplate(2, all), {
+    areas: '"wg wi" "wl wl" "tg ti" "tl tl" "surv tab" "grid grid"',
+    rows: 'var(--row-h) var(--row-h) var(--row-h) var(--row-h) calc(var(--row-h) * 1.4) auto',
+  });
+  assert.equal(gridTemplate(6, all).areas, '"wg wg wi wi wl wl" "tg tg ti ti tl tl" "surv surv tab tab tab tab" "grid grid grid grid grid grid"');
+  const shown = all.filter(id => !HIDDEN_VIEWS.includes(id));
+  assert.deepEqual(gridTemplate(2, shown), {
+    areas: '"wg wi" "tg ti" "surv tab" "grid grid"',
+    rows: 'var(--row-h) var(--row-h) calc(var(--row-h) * 1.4) auto',
+  });
+  assert.equal(gridTemplate(6, shown).areas, '"wg wg wg wi wi wi" "tg tg tg ti ti ti" "surv surv tab tab tab tab" "grid grid grid grid grid grid"');
+  // One card left in a row takes the whole row; a card with nothing to show (no table) gives its row-mate the width.
+  assert.equal(gridTemplate(6, ['weight-mice', 'survival']).areas, '"wi wi wi wi wi wi" "surv surv surv surv surv surv"');
 });
