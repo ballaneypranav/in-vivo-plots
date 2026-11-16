@@ -85,22 +85,26 @@ SETTLE_JS = """async () => {
   }
 }"""
 
-# Smallest x (points and dose marks) of each time chart on screen, and of each chart drawn as a slide image.
+# [smallest, largest] x (points and dose marks) of each time chart, on screen and drawn as a slide image.
 SLIDE_XS_JS = """() => {
-  const minX = c => Math.min(...c.data.datasets.flatMap(ds => ds.data.map(q => q && q.x)),
-    ...(c.options.plugins.doses ? c.options.plugins.doses.lanes.flatMap(l => l.doses.map(z => z.x)) : []));
-  const screen = Object.values(state.views).filter(v => v.chart && v.chart.config.type === 'line').map(v => minX(v.chart));
+  const span = c => {
+    const xs = [...c.data.datasets.flatMap(ds => ds.data.map(q => q && q.x)),
+      ...(c.options.plugins.doses ? c.options.plugins.doses.lanes.flatMap(l => l.doses.map(z => z.x)) : [])].filter(x => typeof x === 'number');
+    return [Math.min(...xs), Math.max(...xs)];
+  };
+  const ids = Object.keys(state.views).filter(id => state.views[id].chart && state.views[id].chart.config.type === 'line');
+  const screen = Object.fromEntries(ids.map(id => [id, span(state.views[id].chart)]));
   const slide = {};
   const orig = makeChart;
-  makeChart = (...a) => { const c = orig(...a); slide.$last = c; return c; };
+  let last = null;
+  makeChart = (...a) => (last = orig(...a));
   try {
-    for (const id of Object.keys(state.views)) {
-      if (!state.views[id].chart || state.views[id].chart.config.type !== 'line') continue;
-      delete slide.$last;
+    for (const id of ids) {
+      last = null;
       renderOffscreen(id, 1184, 528, themeFor('light'));
-      if (slide.$last) slide[id] = minX(slide.$last);
+      if (last) slide[id] = span(last);
     }
-  } finally { makeChart = orig; delete slide.$last; }
+  } finally { makeChart = orig; }
   return { screen, slide };
 }"""
 
@@ -124,17 +128,38 @@ FROM_START_JS = """async () => {
 
 
 def from_start(browser, url):
-    """X axis from treatment start: the screen keeps days before 0, a slide image leaves them out."""
+    """X axis from treatment start: the days before 0 and after the first group ends can each be hidden, on screen and on slides.
+    Drug starts on day 5 of the study (days -4 to 4), Vehicle on day 3 (days -2 to 6)."""
     print("from treatment start (synthetic)")
     page = browser.new_page(viewport={"width": 1400, "height": 900})
     page.goto(url)
     page.evaluate(FROM_START_JS)
     page.wait_for_selector("#table")
+    page.click("[data-pref=x][data-value=date]")
+    check(page.locator("[data-pref=pre]").first.is_hidden() and page.locator("[data-pref=tail]").first.is_hidden(),
+          "day range toggles hidden unless the x axis is From start")
     page.click("[data-pref=x][data-value=treat]")
-    pre = page.evaluate(SLIDE_XS_JS)
-    check(pre["screen"] and min(pre["screen"]) < 0, f"on screen, days before treatment start are plotted {pre['screen']}")
-    # Group means are nudged a fraction of a day sideways so error bars don't overlap.
-    check(pre["slide"] and all(v > -0.5 for v in pre["slide"].values()), f"slide images start at day 0 {pre['slide']}")
+    check(page.locator("[data-pref=pre]").first.is_visible() and page.locator("[data-pref=tail]").first.is_visible(),
+          "day range toggles shown with x From start")
+
+    def spans():
+        r = page.evaluate(SLIDE_XS_JS)
+        return list(r["screen"].values()) + list(r["slide"].values()), r
+
+    # Group means are nudged a fraction of a day sideways so error bars don't overlap: allow ±0.5.
+    v, r = spans()
+    check(min(a for a, _ in v) < -1 and max(b for _, b in v) > 5, f"both shown by default {r['screen']}")
+    page.click("[data-pref=pre][data-value=hide]")
+    v, r = spans()
+    check(all(a > -0.5 for a, _ in v) and max(b for _, b in v) > 5, f"days before 0 hidden, on screen and slides {r}")
+    page.click("[data-pref=tail][data-value=hide]")
+    v, r = spans()
+    check(all(a > -0.5 and b < 4.5 for a, b in v), f"and days after Drug ends (day 4) hidden {r}")
+    check(r["screen"]["survival"][1] == 4, f"survival held to the cut {r['screen']['survival']}")
+    page.click("[data-pref=pre][data-value=show]")
+    v, r = spans()
+    check(min(a for a, _ in v) < -1 and all(b < 4.5 for _, b in v), f"each toggle on its own {r['screen']}")
+    page.click("[data-pref=tail][data-value=show]")
     page.close()
 
 

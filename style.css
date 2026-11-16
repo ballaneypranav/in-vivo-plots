@@ -150,6 +150,7 @@ button:focus-visible, select:focus-visible, tr:focus-visible { outline: 2px soli
 }
 .toolbar[hidden] { display: none; }
 .seg { display: inline-flex; align-items: center; gap: 6px; }
+.seg[hidden] { display: none; }
 .seg-label { font-size: 0.78rem; color: var(--ink-2); white-space: nowrap; }
 .seg-buttons { display: inline-flex; border: 1px solid var(--axis); border-radius: 8px; overflow: hidden; }
 .seg-buttons button {
