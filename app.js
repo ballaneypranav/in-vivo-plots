@@ -2299,6 +2299,7 @@ function renderViews() {
   renderDoseCalendar(root, d);
   renderDoses(root, d);
   renderJump();
+  setTop();
 }
 
 /* ------------------------------------------------------------- jump bar */
@@ -3024,12 +3025,18 @@ async function loadFile(file) {
 
 // Charts take their height from the space left under the header (CSS var --top), so the two
 // chart rows fit on one desktop screen.
+// offsetTop is layout-only (no scroll position), so it is right whenever it is read.
+function setTop() {
+  const views = document.getElementById('views');
+  let top = 0;
+  for (let el = views; el; el = el.offsetParent) top += el.offsetTop;
+  document.documentElement.style.setProperty('--top', `${Math.round(top)}px`);
+}
+
 function trackTop() {
-  const set = () => {
-    const top = document.getElementById('views').getBoundingClientRect().top + window.scrollY;
-    document.documentElement.style.setProperty('--top', `${Math.round(top)}px`);
-  };
+  const set = setTop;
   set();
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(set);
   if (typeof ResizeObserver !== 'undefined') {
     const ro = new ResizeObserver(set);
     ro.observe(document.querySelector('header'));
