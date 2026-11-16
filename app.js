@@ -1106,6 +1106,7 @@ const PREF_VALUES = {
   base: ['first', 'start'],      // weight % change and relative volume from the first measurement or the treatment start
   pre: ['show', 'hide'],         // x = treatment: days before day 0
   tail: ['show', 'hide'],        // x = treatment: days after the shown group whose data ends first has its last value
+  band: ['show', 'hide'],        // the shaded tumor volume range (TUMOR_BAND) on the tumor volume charts
   theme: ['auto', 'light', 'dark'],
   order: ['value', 'mouse'],     // per-mouse bar charts
   heat: ['pct', 'weight', 'volume', 'rtv'],
@@ -1274,9 +1275,10 @@ const errBars = {
 };
 
 // Shaded horizontal bands behind the data: options.plugins.bands = { color, labelColor, bands: [{ from, to, label }] }.
-// Used for the tumor volume range 50–100 (TUMOR_BAND) on the tumor volume charts.
+// Used for the tumor volume range 50–100 (TUMOR_BAND) on the tumor volume charts, unless the Shaded setting hides it.
 const TUMOR_BAND = { from: 50, to: 100, label: '50–100' };
-const bandNote = metric => (metric === 'volume' ? ` Shaded: volume ${TUMOR_BAND.label}.` : '');
+const showBand = metric => metric === 'volume' && state.prefs.band === 'show';
+const bandNote = metric => (showBand(metric) ? ` Shaded: volume ${TUMOR_BAND.label}.` : '');
 const bands = {
   id: 'bands',
   beforeDatasetsDraw(chart, _args, opts) {
@@ -1654,7 +1656,7 @@ function chartOptions(t, d, metric) {
         ] : [],
       },
       endLabels: { color: t.ink2 },
-      bands: { color: t.band, labelColor: t.muted, bands: metric === 'volume' ? [TUMOR_BAND] : [] },
+      bands: { color: t.band, labelColor: t.muted, bands: showBand(metric) ? [TUMOR_BAND] : [] },
       doses: { lanes: [], ink: t.ink, ink2: t.ink2, muted: t.muted, grid: t.grid, surface: t.surface, axis: t.axis },
     },
   };
@@ -2565,25 +2567,29 @@ function prefControls(d, inToolbar = false) {
       ...(hasStarts() ? [['treat', 'From start', 'Days from each mouse’s treatment start (its own on the Mice sheet, else its group’s); day 0 lines the mice up']] : [])]),
     base: hasStarts() ? segControl('base', 'Change from', [['first', 'First value', 'Weight % change and relative tumor volume from each mouse’s first measurement'],
       ['start', 'Treatment start', 'Weight % change and relative tumor volume from the last value on or before each mouse’s treatment start']]) : '',
-    // Only with x = days from treatment start (syncControls hides them otherwise).
-    pre: hasStarts() ? treatOnly(segControl('pre', 'Before day 0', [['show', 'Show', 'Plot the days before each mouse’s treatment start'],
+    // Only with x = days from treatment start, and with tumor as volume (syncControls hides them otherwise).
+    band: onlyWhen('volume', segControl('band', `Shaded ${TUMOR_BAND.label}`, [['show', 'Show', `Shade tumor volume ${TUMOR_BAND.label} on the tumor volume charts`],
+      ['hide', 'Hide', 'No shaded range']])),
+    pre: hasStarts() ? onlyWhen('treat', segControl('pre', 'Before day 0', [['show', 'Show', 'Plot the days before each mouse’s treatment start'],
       ['hide', 'Hide', 'Start the x axis at day 0']])) : '',
-    tail: hasStarts() ? treatOnly(segControl('tail', 'After a group ends', [['show', 'Show', 'Plot every day any shown group has data'],
+    tail: hasStarts() ? onlyWhen('treat', segControl('tail', 'After a group ends', [['show', 'Show', 'Plot every day any shown group has data'],
       ['hide', 'Hide', 'End the x axis at the last day of the shown group whose data ends first']])) : '',
     focus: `<label class="seg"><span class="seg-label">Highlight</span><select${inToolbar ? ' id="focus-mouse"' : ''} data-focus-select><option value="">No mouse</option>${mice}</select></label>`,
   };
 }
 
-const treatOnly = html => html.replace('<div class="seg"', '<div class="seg" data-treat-only');
+// A control shown only when `when` holds (see ONLY_WHEN).
+const onlyWhen = (when, html) => html.replace('<div class="seg"', `<div class="seg" data-only="${when}"`);
+const ONLY_WHEN = { treat: () => treatMode(), volume: () => state.prefs.tumor === 'volume' };
 
 // The settings that change each card, shown with it in full screen. Every card also gets Group by and the chips.
 const CARD_CONTROLS = {
   'weight-group': ['weight', 'error', 'x', 'pre', 'tail', 'base'],
   'weight-mice': ['weight', 'x', 'pre', 'tail', 'base', 'focus'],
   'weight-latest': ['weight', 'base', 'focus'],
-  'tumor-group': ['tumor', 'scale', 'error', 'x', 'pre', 'tail', 'base'],
-  'tumor-mice': ['tumor', 'scale', 'x', 'pre', 'tail', 'base', 'focus'],
-  'tumor-latest': ['tumor', 'scale', 'base', 'focus'],
+  'tumor-group': ['tumor', 'scale', 'band', 'error', 'x', 'pre', 'tail', 'base'],
+  'tumor-mice': ['tumor', 'scale', 'band', 'x', 'pre', 'tail', 'base', 'focus'],
+  'tumor-latest': ['tumor', 'scale', 'band', 'base', 'focus'],
   survival: ['x', 'pre', 'tail'],
   table: ['base', 'focus'],
   grid: ['base', 'focus'],
@@ -2613,6 +2619,7 @@ function renderToolbar(d) {
     ${c.weight}
     ${c.tumor}
     ${c.scale}
+    ${c.band}
     ${c.error}
     ${c.x}
     ${c.pre}
@@ -2666,7 +2673,7 @@ function syncControls(bar) {
   const all = bar.querySelector('[data-cage-all]');
   if (all) all.setAttribute('aria-pressed', String(shown.length === d.cages.length));
   bar.querySelectorAll('[data-focus-select]').forEach(sel => { sel.value = state.focus || ''; });
-  bar.querySelectorAll('[data-treat-only]').forEach(el => { el.hidden = !treatMode(); });
+  bar.querySelectorAll('[data-only]').forEach(el => { el.hidden = !ONLY_WHEN[el.dataset.only](); });
   bar.querySelectorAll('[data-view]').forEach(box => { box.checked = !state.prefs.hiddenViews.includes(box.dataset.view); });
   bar.classList.toggle('open', state.moreSettings);
   const more = bar.querySelector('[data-more-settings]');

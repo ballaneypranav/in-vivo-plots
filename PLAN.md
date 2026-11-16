@@ -128,7 +128,7 @@ A jump bar under the toolbar sticks to the top of the screen while scrolling: We
 1. Body weight per cage over time, mean ± error; reference lines at −15% and −20% in % mode.
 2. Individual body weights, one line per mouse; colored by group or cage, or by mouse with end labels when one is shown. ◆ marks a move (new cage or tail mark), ✕ the end; the tooltip gives the cage and tail mark that day, the move and any note.
 3. Body weight per mouse at the latest session, bars sorted by value or by mouse.
-4. Tumor volume per cage over time, mean ± error. On the tumor volume charts (4, 5, 6, volume only, not relative) the range 50–100 is shaded (`TUMOR_BAND`, said in the subtitle).
+4. Tumor volume per cage over time, mean ± error. On the tumor volume charts (4, 5, 6, volume only, not relative) the range 50–100 is shaded (`TUMOR_BAND`, said in the subtitle), unless the toolbar's **Shaded 50–100** setting (Show/Hide, shown only with tumor as volume) hides it.
 5. Individual tumor volumes, one line per mouse.
 6. Tumor volume per mouse at the latest session.
 7. Survival per group or cage (Kaplan–Meier, stepped), with at-risk counts in the tooltip.

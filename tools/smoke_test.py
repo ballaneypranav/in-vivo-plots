@@ -160,6 +160,17 @@ def from_start(browser, url):
     v, r = spans()
     check(min(a for a, _ in v) < -1 and all(b < 4.5 for _, b in v), f"each toggle on its own {r['screen']}")
     page.click("[data-pref=tail][data-value=show]")
+
+    # Shaded tumor volume range 50–100: on by default, hideable, the control only with tumor as volume
+    bands = lambda: [chart(page, i, "c.options.plugins.bands.bands.length") for i in ("tumor-group", "tumor-mice")]
+    page.click("[data-pref=tumor][data-value=volume]")
+    check(bands() == [1, 1] and page.locator("[data-pref=band]").first.is_visible(), "50–100 shaded by default")
+    page.click("[data-pref=band][data-value=hide]")
+    check(bands() == [0, 0] and "Shaded" not in page.inner_text("#tumor-group"), "50–100 hidden, subtitle too")
+    page.click("[data-pref=tumor][data-value=rtv]")
+    check(page.locator("[data-pref=band]").first.is_hidden(), "shading toggle hidden with relative volume")
+    page.click("[data-pref=tumor][data-value=volume]")
+    page.click("[data-pref=band][data-value=show]")
     page.close()
 
 
