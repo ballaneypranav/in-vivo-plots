@@ -1453,19 +1453,22 @@ function drawDoseLanes(chart, box) {
 const xOfDate = (d, date) => (effX() === 'day' ? daysBetween(d.dates[0], date) : ts(date));
 
 // The x values that get a tick: the sessions, or with x = treatment, every day (or step, see binDays) from treatment
-// start on which a shown mouse with a start had a session.
-function tickXs(d) {
+// start on which a shown mouse with a start has a value of `metric` (any weight or volume when none is given), so a
+// tumor chart does not reach back to sessions that only weighed the mice.
+const hasValue = metric => p => (metric ? p[metric] !== null && p[metric] !== undefined : p.weight !== null || p.volume !== null);
+function tickXs(d, metric = null) {
   if (!treatMode()) return d.dates.map((_, k) => xv(d, k));
   const shown = shownCages(d);
-  return [...new Set(d.mice.filter(m => m.start && shown.includes(m.cage)).flatMap(m => m.points.map(p => binDay(p.tday))))].sort((a, b) => a - b);
+  return [...new Set(d.mice.filter(m => m.start && shown.includes(m.cage))
+    .flatMap(m => m.points.filter(hasValue(metric)).map(p => binDay(p.tday))))].sort((a, b) => a - b);
 }
 
-function xScale(t, d, extraXs = []) {
+function xScale(t, d, extraXs = [], metric = null) {
   const byDate = effX() === 'date';
-  const xs = tickXs(d);
+  const xs = tickXs(d, metric);
   // With binning the ticks are the steps, but each mouse's own line keeps its exact days: keep those in range too.
   const exact = treatMode() && binDays() > 1
-    ? d.mice.filter(m => m.start && shownCages(d).includes(m.cage)).flatMap(m => m.points.filter(p => p.weight !== null || p.volume !== null).map(p => p.tday))
+    ? d.mice.filter(m => m.start && shownCages(d).includes(m.cage)).flatMap(m => m.points.filter(hasValue(metric)).map(p => p.tday))
     : [];
   const all = [...xs, ...extraXs, ...exact];
   if (!all.length) all.push(0);
@@ -1527,7 +1530,7 @@ function chartOptions(t, d, metric) {
     animation: false,
     interaction: { mode: 'nearest', axis: 'xy', intersect: false },
     layout: { padding: { right: 8 } },
-    scales: { x: xScale(t, d), y: yScale(t, metric) },
+    scales: { x: xScale(t, d, [], metric), y: yScale(t, metric) },
     plugins: {
       legend: {
         position: 'top',
@@ -1570,9 +1573,9 @@ function doseLanes(t, d, shown) {
 }
 
 /** Put the dose strip on a time chart: lanes, and an x axis wide enough for doses outside the sessions. */
-function addDoses(opts, t, d, lanes, extraXs = []) {
+function addDoses(opts, t, d, lanes, extraXs = [], metric = null) {
   opts.plugins.doses.lanes = lanes;
-  opts.scales.x = xScale(t, d, [...extraXs, ...lanes.flatMap(l => l.doses.map(z => z.x))]);
+  opts.scales.x = xScale(t, d, [...extraXs, ...lanes.flatMap(l => l.doses.map(z => z.x))], metric);
 }
 const DOSE_KEY = '▲ dose (tap or hover the strip for the drug)';
 
@@ -1692,7 +1695,7 @@ function renderGroupChart(root, t, d, id, metric, title) {
     };
   });
   const opts = chartOptions(t, d, metric);
-  addDoses(opts, t, d, lanes);
+  addDoses(opts, t, d, lanes, [], metric);
   opts.plugins.legend.labels.generateLabels = cageLegend(t, d).generateLabels;
   opts.plugins.legend.onClick = cageLegend(t, d).onClick;
   opts.plugins.tooltip.callbacks.label = c =>
@@ -1774,7 +1777,7 @@ function renderMiceChart(root, t, d, id, metric, title) {
   emphasize(datasets, focusIndex());
 
   const opts = chartOptions(t, d, metric);
-  addDoses(opts, t, d, lanes);
+  addDoses(opts, t, d, lanes, [], metric);
   opts.interaction = { mode: 'nearest', intersect: false };
   if (datasets.some(ds => ds.endLabel)) opts.layout.padding.right = 44;
   opts.plugins.tooltip.callbacks.label = c => {
