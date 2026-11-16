@@ -1213,6 +1213,9 @@ const effX = () => (state.prefs.x === 'treat' && !hasStarts() ? 'date' : state.p
 const effBase = () => (state.prefs.base === 'start' && hasStarts() ? 'start' : 'first');
 const treatMode = () => effX() === 'treat';
 // From treatment start, means are taken in steps of the measurement cadence (Groups sheet), so staggered starts line up.
+// A slide image with x = days from treatment start leaves out everything before day 0 (the screen keeps it).
+const cutPreStart = () => state.exporting && treatMode();
+const fromDay0 = x => !cutPreStart() || x >= 0;
 const binDays = () => (treatMode() && state.base && state.base.cadence ? state.base.cadence.every : 1);
 const binDay = t => { const b = binDays(); return b > 1 ? Math.ceil(t / b) * b || 0 : t; };
 const xv = (d, k) => (effX() === 'day' ? d.days[k] : ts(d.dates[k]));
@@ -1516,7 +1519,7 @@ function tickXs(d, metric = null) {
     return d.dates.map((_, k) => k).filter(k => mice.some(m => m.points[k] && has(m.points[k]))).map(k => xv(d, k));
   }
   return [...new Set(d.mice.filter(m => m.start && shown.includes(m.cage))
-    .flatMap(m => m.points.filter(hasValue(metric)).map(p => binDay(p.tday))))].sort((a, b) => a - b);
+    .flatMap(m => m.points.filter(hasValue(metric)).map(p => binDay(p.tday))))].filter(fromDay0).sort((a, b) => a - b);
 }
 
 // `ticks` overrides them for a chart that knows its own x values (the group means leave out days before enrolment).
@@ -1525,7 +1528,7 @@ function xScale(t, d, extraXs = [], metric = null, ticks = null) {
   const xs = ticks || tickXs(d, metric);
   // With binning the ticks are the steps, but each mouse's own line keeps its exact days: keep those in range too.
   const exact = !ticks && treatMode() && binDays() > 1
-    ? d.mice.filter(m => m.start && shownCages(d).includes(m.cage)).flatMap(m => m.points.filter(hasValue(metric)).map(p => p.tday))
+    ? d.mice.filter(m => m.start && shownCages(d).includes(m.cage)).flatMap(m => m.points.filter(hasValue(metric)).map(p => p.tday)).filter(fromDay0)
     : [];
   const all = [...xs, ...extraXs, ...exact];
   if (!all.length) all.push(0);
@@ -1649,7 +1652,8 @@ function doseLanes(t, d, shown) {
   return (treat ? dosesByTreatDay(d.mice, d.cages, d.cutoff) : dosesByKey(d.mice, d.cages))
     .map((g, k) => ({ g, k }))
     .filter(({ g }) => shown.includes(g.key) && g.doses.length)
-    .map(({ g, k }) => ({ label: cageName(d, g.key), color: seriesStyle(t, k).color, doses: g.doses.map(place) }));
+    .map(({ g, k }) => ({ label: cageName(d, g.key), color: seriesStyle(t, k).color, doses: g.doses.map(place).filter(z => !treat || fromDay0(z.x)) }))
+    .filter(l => l.doses.length);
 }
 
 /** Put the dose strip on a time chart: lanes, and an x axis wide enough for doses outside the sessions. */
@@ -1752,6 +1756,7 @@ function renderGroupChart(root, t, d, id, metric, title) {
   const sessionXs = d.dates.map((_, k) => xv(d, k));
   const series = d.groups.map(g => (treat
     ? summarizeByTreatDay(d.mice.filter(m => m.cage === g.cage), metric, binDays())
+      .filter(b => fromDay0(b.day))
       .map(b => ({ ...b, x: b.day, tday: b.day, date: b.dates.length === 1 ? b.dates[0] : null }))
     : g[metric].map((p, i) => ({ ...p, x: sessionXs[i], day: d.days[i] }))));
   // The x axis has a tick only where a shown group has a mean (with binning, its exact days stay in range).
@@ -1761,7 +1766,7 @@ function renderGroupChart(root, t, d, id, metric, title) {
     return;
   }
   const xs = [...new Set(plotted.map(p => p.x))].sort((a, b) => a - b);
-  const exactXs = treat ? plotted.flatMap(p => p.tdays) : [];
+  const exactXs = treat ? plotted.flatMap(p => p.tdays).filter(fromDay0) : [];
 
   const n = d.groups.length;
   const unit = effX() === 'date' ? DAY : 1;
@@ -1855,7 +1860,7 @@ function renderMiceChart(root, t, d, id, metric, title) {
       data: m.points.map((p, i) => ({
         x: treat ? p.tday : xv(d, i), y: p[metric], date: p.date, day: p.day, tday: p.tday,
         cage: p.cage, mark: p.mark, moved: p.moved, end: p.end, note: p.note,
-      })),
+      })).filter(pt => !treat || fromDay0(pt.x)),
       $color: color, $ring: t.surface, $width: width, borderDash: dash,
       pointStyle: markerStyle, pointRadius: markerRadius(solo ? 3.5 : 2.5), pointHoverRadius: markerRadius(6),
       pointBorderWidth: markerBorder, spanGaps: true,

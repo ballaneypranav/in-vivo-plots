@@ -85,6 +85,58 @@ SETTLE_JS = """async () => {
   }
 }"""
 
+# Smallest x (points and dose marks) of each time chart on screen, and of each chart drawn as a slide image.
+SLIDE_XS_JS = """() => {
+  const minX = c => Math.min(...c.data.datasets.flatMap(ds => ds.data.map(q => q && q.x)),
+    ...(c.options.plugins.doses ? c.options.plugins.doses.lanes.flatMap(l => l.doses.map(z => z.x)) : []));
+  const screen = Object.values(state.views).filter(v => v.chart && v.chart.config.type === 'line').map(v => minX(v.chart));
+  const slide = {};
+  const orig = makeChart;
+  makeChart = (...a) => { const c = orig(...a); slide.$last = c; return c; };
+  try {
+    for (const id of Object.keys(state.views)) {
+      if (!state.views[id].chart || state.views[id].chart.config.type !== 'line') continue;
+      delete slide.$last;
+      renderOffscreen(id, 1184, 528, themeFor('light'));
+      if (slide.$last) slide[id] = minX(slide.$last);
+    }
+  } finally { makeChart = orig; delete slide.$last; }
+  return { screen, slide };
+}"""
+
+
+# A synthetic workbook with group treatment starts and sessions and doses before them, loaded in the page.
+FROM_START_JS = """async () => {
+  const XLSX = await loadXlsxLib();
+  const S = XLSX.utils.aoa_to_sheet;
+  const wb = XLSX.utils.book_new();
+  const days = ['2026-01-01', '2026-01-03', '2026-01-05', '2026-01-07', '2026-01-09'];
+  const meas = [['Animal ID', 'Date', 'Weight (g)', 'Tumor Length', 'Tumor Breadth']];
+  for (const id of ['A1', 'A2', 'B1', 'B2']) days.forEach((d, k) => meas.push([id, d, 20 + k, 3 + k, 2 + k / 2]));
+  XLSX.utils.book_append_sheet(wb, S(meas), 'Measurements');
+  XLSX.utils.book_append_sheet(wb, S([['Animal ID', 'Group', 'Status'], ['A1', 'Drug', 'alive'], ['A2', 'Drug', 'alive'],
+    ['B1', 'Vehicle', 'alive'], ['B2', 'Vehicle', 'alive']]), 'Mice');
+  XLSX.utils.book_append_sheet(wb, S([['Group', 'Treatment start'], ['Drug', '2026-01-05'], ['Vehicle', '2026-01-03']]), 'Groups');
+  XLSX.utils.book_append_sheet(wb, S([['Animal ID', 'Date', 'Drug'], ['A1', '2026-01-01', 'X'], ['A1', '2026-01-05', 'X'],
+    ['B1', '2026-01-03', 'PBS'], ['B1', '2026-01-07', 'PBS']]), 'Injections');
+  await loadWorkbook(new Uint8Array(XLSX.write(wb, { type: 'array', bookType: 'xlsx' })), 'Synthetic from start.xlsx');
+}"""
+
+
+def from_start(browser, url):
+    """X axis from treatment start: the screen keeps days before 0, a slide image leaves them out."""
+    print("from treatment start (synthetic)")
+    page = browser.new_page(viewport={"width": 1400, "height": 900})
+    page.goto(url)
+    page.evaluate(FROM_START_JS)
+    page.wait_for_selector("#table")
+    page.click("[data-pref=x][data-value=treat]")
+    pre = page.evaluate(SLIDE_XS_JS)
+    check(pre["screen"] and min(pre["screen"]) < 0, f"on screen, days before treatment start are plotted {pre['screen']}")
+    # Group means are nudged a fraction of a day sideways so error bars don't overlap.
+    check(pre["slide"] and all(v > -0.5 for v in pre["slide"].values()), f"slide images start at day 0 {pre['slide']}")
+    page.close()
+
 
 def chart(page, id_, expr):
     """Evaluate `expr` with `c` bound to the Chart.js instance in section #id_."""
@@ -423,6 +475,7 @@ def main(note):
     with sync_playwright() as p:
         # CHROMIUM=/path/to/chrome uses an existing browser instead of the one Playwright expects.
         browser = p.chromium.launch(executable_path=os.environ.get("CHROMIUM") or None)
+        from_start(browser, url)
         phone(browser, url)
         desktop(browser, url, 1920, 1080, 6, None)
         desktop(browser, url, 1536, 864, 6, None)
