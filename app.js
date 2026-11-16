@@ -1505,17 +1505,22 @@ const xOfDate = (d, date) => (effX() === 'day' ? daysBetween(d.dates[0], date) :
 // tumor chart does not reach back to sessions that only weighed the mice.
 const hasValue = metric => p => (metric ? p[metric] !== null && p[metric] !== undefined : p.weight !== null || p.volume !== null);
 function tickXs(d, metric = null) {
-  if (!treatMode()) return d.dates.map((_, k) => xv(d, k));
   const shown = shownCages(d);
+  if (!treatMode()) {
+    const has = hasValue(metric);
+    const mice = d.mice.filter(m => shown.includes(m.cage));
+    return d.dates.map((_, k) => k).filter(k => mice.some(m => m.points[k] && has(m.points[k]))).map(k => xv(d, k));
+  }
   return [...new Set(d.mice.filter(m => m.start && shown.includes(m.cage))
     .flatMap(m => m.points.filter(hasValue(metric)).map(p => binDay(p.tday))))].sort((a, b) => a - b);
 }
 
-function xScale(t, d, extraXs = [], metric = null) {
+// `ticks` overrides them for a chart that knows its own x values (the group means leave out days before enrolment).
+function xScale(t, d, extraXs = [], metric = null, ticks = null) {
   const byDate = effX() === 'date';
-  const xs = tickXs(d, metric);
+  const xs = ticks || tickXs(d, metric);
   // With binning the ticks are the steps, but each mouse's own line keeps its exact days: keep those in range too.
-  const exact = treatMode() && binDays() > 1
+  const exact = !ticks && treatMode() && binDays() > 1
     ? d.mice.filter(m => m.start && shownCages(d).includes(m.cage)).flatMap(m => m.points.filter(hasValue(metric)).map(p => p.tday))
     : [];
   const all = [...xs, ...extraXs, ...exact];
@@ -1644,9 +1649,9 @@ function doseLanes(t, d, shown) {
 }
 
 /** Put the dose strip on a time chart: lanes, and an x axis wide enough for doses outside the sessions. */
-function addDoses(opts, t, d, lanes, extraXs = [], metric = null) {
+function addDoses(opts, t, d, lanes, extraXs = [], metric = null, ticks = null) {
   opts.plugins.doses.lanes = lanes;
-  opts.scales.x = xScale(t, d, [...extraXs, ...lanes.flatMap(l => l.doses.map(z => z.x))], metric);
+  opts.scales.x = xScale(t, d, [...extraXs, ...lanes.flatMap(l => l.doses.map(z => z.x))], metric, ticks);
 }
 const DOSE_KEY = '▲ dose (tap or hover the strip for the drug)';
 
@@ -1740,15 +1745,19 @@ function renderGroupChart(root, t, d, id, metric, title) {
   root.appendChild(sec);
 
   // Points per group or cage: { x, mean, sem, n, date, day } per session, or with x = treatment per day from start.
-  const xs = tickXs(d);
+  const sessionXs = d.dates.map((_, k) => xv(d, k));
   const series = d.groups.map(g => (treat
     ? summarizeByTreatDay(d.mice.filter(m => m.cage === g.cage), metric, binDays())
       .map(b => ({ ...b, x: b.day, tday: b.day, date: b.dates.length === 1 ? b.dates[0] : null }))
-    : g[metric].map((p, i) => ({ ...p, x: xs[i], day: d.days[i] }))));
-  if (!d.groups.some((g, k) => shown.includes(g.cage) && series[k].some(p => p.n > 0))) {
+    : g[metric].map((p, i) => ({ ...p, x: sessionXs[i], day: d.days[i] }))));
+  // The x axis has a tick only where a shown group has a mean (with binning, its exact days stay in range).
+  const plotted = d.groups.flatMap((g, k) => (shown.includes(g.cage) ? series[k].filter(p => p.n > 0 && p.mean !== null) : []));
+  if (!plotted.length) {
     empty(sec, M.tumor ? 'No tumor measurements yet.' : 'No measurements yet.');
     return;
   }
+  const xs = [...new Set(plotted.map(p => p.x))].sort((a, b) => a - b);
+  const exactXs = treat ? plotted.flatMap(p => p.tdays) : [];
 
   const n = d.groups.length;
   const unit = effX() === 'date' ? DAY : 1;
@@ -1771,7 +1780,7 @@ function renderGroupChart(root, t, d, id, metric, title) {
     };
   });
   const opts = chartOptions(t, d, metric);
-  addDoses(opts, t, d, lanes, [], metric);
+  addDoses(opts, t, d, lanes, exactXs, metric, xs);
   opts.plugins.legend.labels.generateLabels = cageLegend(t, d).generateLabels;
   opts.plugins.legend.onClick = cageLegend(t, d).onClick;
   opts.plugins.tooltip.callbacks.label = c =>
@@ -2276,7 +2285,12 @@ function renderSurvival(root, t, d) {
     };
   });
   const opts = chartOptions(t, d, 'pct');
-  addDoses(opts, t, d, lanes, curves.flatMap(c => c.points.map(p => (treat ? p.day : xOfDate(d, p.date)))));
+  // Ticks only where a shown curve runs (with x = treatment, curves start at day 0).
+  const curveXs = curves.filter(c => shown.includes(c.key)).flatMap(c => c.points.map(p => (treat ? p.day : xOfDate(d, p.date))));
+  const lo = Math.min(...curveXs);
+  const hi = Math.max(...curveXs);
+  const ticks = curveXs.length ? tickXs(d).filter(x => x >= lo && x <= hi) : null;
+  addDoses(opts, t, d, lanes, curveXs, null, ticks && ticks.length ? ticks : null);
   opts.scales.y = {
     type: 'linear', min: 0, max: 105,
     title: { display: true, text: 'Surviving (%)', color: t.ink2 },
