@@ -1138,6 +1138,7 @@ const state = {
   parsed: null,     // parse output, for the workbook's Mice order
   jumpTo: null,     // card last picked in the jump bar, to tell apart cards that share a row
   moreSettings: false, // phone: the toolbar's less-used settings unfolded
+  chartFont: 12,    // chart text size the views were drawn with (chartFont)
 };
 
 const savePrefs = () => store.set(STORE_PREFS, JSON.stringify(state.prefs));
@@ -1222,6 +1223,12 @@ const errName = () => ({ sem: 'SEM', sd: 'SD', none: '' }[state.prefs.error]);
 
 /* ---------------------------------------------------------- chart plugins */
 
+// Chart text is 12px, larger on big screens (chartFont) and on slides (SLIDE_FONT). The plugins below size their
+// text, lines and markers from Chart.defaults.font.size, so they grow with it.
+const chartFont = () => Math.min(15, Math.max(12, Math.round(innerWidth / 200)));
+const fz = px => Math.round(px * (Chart.defaults.font.size || 12) / 12 * 10) / 10;
+const sysFont = (px, weight = '') => `${weight ? `${weight} ` : ''}${fz(px)}px system-ui, -apple-system, "Segoe UI", sans-serif`;
+
 // Chart.js has no error bars: draw whiskers for datasets that carry `err`.
 const errBars = {
   id: 'errBars',
@@ -1233,7 +1240,8 @@ const errBars = {
       const meta = chart.getDatasetMeta(di);
       ctx.save();
       ctx.strokeStyle = ds.borderColor;
-      ctx.lineWidth = 1.5;
+      ctx.lineWidth = fz(1.5);
+      const cap = fz(4);
       meta.data.forEach((pt, i) => {
         const d = ds.data[i];
         const s = ds.err[i];
@@ -1244,8 +1252,8 @@ const errBars = {
         const bottom = y.type === 'logarithmic' && low <= 0 ? chart.chartArea.bottom : y.getPixelForValue(low);
         ctx.beginPath();
         ctx.moveTo(pt.x, top); ctx.lineTo(pt.x, bottom);
-        ctx.moveTo(pt.x - 4, top); ctx.lineTo(pt.x + 4, top);
-        ctx.moveTo(pt.x - 4, bottom); ctx.lineTo(pt.x + 4, bottom);
+        ctx.moveTo(pt.x - cap, top); ctx.lineTo(pt.x + cap, top);
+        ctx.moveTo(pt.x - cap, bottom); ctx.lineTo(pt.x + cap, bottom);
         ctx.stroke();
       });
       ctx.restore();
@@ -1265,15 +1273,15 @@ const refLines = {
       if (py < a.top || py > a.bottom) continue;
       ctx.save();
       ctx.strokeStyle = l.color;
-      ctx.lineWidth = 1.5;
-      ctx.setLineDash([6, 4]);
+      ctx.lineWidth = fz(1.5);
+      ctx.setLineDash([fz(6), fz(4)]);
       ctx.beginPath(); ctx.moveTo(a.left, py); ctx.lineTo(a.right, py); ctx.stroke();
       ctx.setLineDash([]);
       ctx.fillStyle = opts.labelColor;
-      ctx.font = '12px system-ui, sans-serif';
+      ctx.font = sysFont(12);
       ctx.textAlign = 'right';
       ctx.textBaseline = 'bottom';
-      ctx.fillText(l.label, a.right - 4, py - 3);
+      ctx.fillText(l.label, a.right - fz(4), py - fz(3));
       ctx.restore();
     }
   },
@@ -1291,12 +1299,12 @@ const endLabels = {
       while (k >= 0 && (ds.data[k].y === null || ds.data[k].y === undefined)) k--;
       if (k < 0) return;
       const pt = chart.getDatasetMeta(di).data[k];
-      labels.push({ x: pt.x + 8, y: pt.y, text: ds.endLabel });
+      labels.push({ x: pt.x + fz(8), y: pt.y, text: ds.endLabel });
     });
     labels.sort((a, b) => a.y - b.y);
-    for (let i = 1; i < labels.length; i++) labels[i].y = Math.max(labels[i].y, labels[i - 1].y + 12);
+    for (let i = 1; i < labels.length; i++) labels[i].y = Math.max(labels[i].y, labels[i - 1].y + fz(12));
     ctx.save();
-    ctx.font = '600 11px system-ui, sans-serif';
+    ctx.font = sysFont(11, 600);
     ctx.fillStyle = opts.color;
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
@@ -1310,7 +1318,8 @@ const endLabels = {
 // or tapping the strip shows what each lane got that day. options.plugins.doses = { lanes: [{ label, color,
 // doses: [{ x, title, eligible, items }] }], ink, ink2, muted, grid, surface, axis }; doses at the same x share a box.
 // Lane height: tighter on short (phone) charts so a strip of several lanes leaves room for the plot.
-const doseLane = chart => (chart.height < 340 ? 8 : 11);
+const doseLaneBase = chart => (chart.height < 340 * fz(1) ? 8 : 11);
+const doseLane = chart => fz(doseLaneBase(chart));
 const doseText = it => [it.drug, it.dose, it.volume ? `${it.volume} µL` : '', it.route].filter(Boolean).join(' · ');
 const doseCount = (it, eligible) => (it.mice.length >= eligible ? `${it.mice.length} mice` : `${it.mice.length} of ${eligible} mice`);
 
@@ -1320,7 +1329,7 @@ function doseTriangle(ctx, x, y, r, filled) {
   ctx.lineTo(x + r, y + r * 0.8);
   ctx.lineTo(x - r, y + r * 0.8);
   ctx.closePath();
-  if (filled) ctx.fill(); else { ctx.lineWidth = 1.5; ctx.stroke(); }
+  if (filled) ctx.fill(); else { ctx.lineWidth = fz(1.5); ctx.stroke(); }
 }
 
 const doseStrip = {
@@ -1332,7 +1341,7 @@ const doseStrip = {
       update(maxWidth) {
         const n = (box.opts.lanes || []).length;
         box.width = maxWidth;
-        box.height = n ? 6 + n * doseLane(chart) : 0;
+        box.height = n ? fz(6) + n * doseLane(chart) : 0;
       },
       draw() { drawDoseLanes(chart, box); },
     };
@@ -1425,13 +1434,14 @@ function drawDoseLanes(chart, box) {
   const x = chart.scales.x;
   const lane = doseLane(chart);
   ctx.save();
-  ctx.font = '10px system-ui, -apple-system, "Segoe UI", sans-serif';
+  const top = box.top + fz(3);
+  ctx.font = sysFont(10);
   ctx.fillStyle = o.muted;
   ctx.textAlign = 'right';
   ctx.textBaseline = 'middle';
-  ctx.fillText('Dose', a.left - 6, box.top + 3 + (lanes.length * lane) / 2);
+  ctx.fillText('Dose', a.left - fz(6), top + (lanes.length * lane) / 2);
   lanes.forEach((l, i) => {
-    const cy = box.top + 3 + i * lane + lane / 2;
+    const cy = top + i * lane + lane / 2;
     ctx.strokeStyle = o.grid;
     ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(a.left, cy); ctx.lineTo(a.right, cy); ctx.stroke();
@@ -1441,7 +1451,7 @@ function drawDoseLanes(chart, box) {
       const px = x.getPixelForValue(dz.x);
       if (px < a.left - 1 || px > a.right + 1) continue;
       const all = dz.items.every(it => it.mice.length >= (it.eligible ?? dz.eligible));
-      doseTriangle(ctx, px, cy, lane < 10 ? 3.2 : 4, all);
+      doseTriangle(ctx, px, cy, fz(doseLaneBase(chart) < 10 ? 3.2 : 4), all);
     }
   });
   ctx.restore();
@@ -1529,7 +1539,7 @@ function chartOptions(t, d, metric) {
     maintainAspectRatio: false,
     animation: false,
     interaction: { mode: 'nearest', axis: 'xy', intersect: false },
-    layout: { padding: { right: 8 } },
+    layout: { padding: { right: fz(14) } },
     scales: { x: xScale(t, d, [], metric), y: yScale(t, metric) },
     plugins: {
       legend: {
@@ -1779,7 +1789,7 @@ function renderMiceChart(root, t, d, id, metric, title) {
   const opts = chartOptions(t, d, metric);
   addDoses(opts, t, d, lanes, [], metric);
   opts.interaction = { mode: 'nearest', intersect: false };
-  if (datasets.some(ds => ds.endLabel)) opts.layout.padding.right = 44;
+  if (datasets.some(ds => ds.endLabel)) opts.layout.padding.right = fz(44);
   opts.plugins.tooltip.callbacks.label = c => {
     const where = placeLong(c.raw.cage, c.raw.mark);
     return `Mouse ${c.dataset.label}${where ? ` (${where})` : ''}: ${M.val(c.raw.y)}`;
@@ -2243,6 +2253,7 @@ function renderViews() {
   if (!d || !d.dates.length) { renderJump(); return; }
   const t = theme();
   Chart.defaults.font.family = 'system-ui, -apple-system, "Segoe UI", sans-serif';
+  Chart.defaults.font.size = state.chartFont = chartFont();
   Chart.defaults.color = t.ink2;
   const w = state.prefs.weight;
   const tm = state.prefs.tumor;
@@ -2998,6 +3009,12 @@ function trackTop() {
     if (nav) ro.observe(nav);
   }
   window.addEventListener('resize', set);
+  // Chart text grows on big screens: redraw when a resize crosses a size step.
+  let pending = 0;
+  window.addEventListener('resize', () => {
+    clearTimeout(pending);
+    pending = setTimeout(() => { if (state.derived && chartFont() !== state.chartFont) renderViews(); }, 200);
+  });
 }
 
 function init() {
