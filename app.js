@@ -1491,12 +1491,34 @@ function xScale(t, d, extraXs = [], metric = null) {
     min: lo - pad,
     max: hi + pad,
     afterBuildTicks: axis => { axis.ticks = xs.map(value => ({ value })); },
+    afterTickToLabelConversion: thinLabels,
     // From treatment start the ticks are denser (one per session per start) and the axis has a title: numbers only.
-    ticks: { color: t.muted, maxRotation: 0, autoSkip: true, callback: v => (byDate ? fmtDate(v) : treatMode() ? `${v}` : `Day ${v}`) },
+    ticks: { color: t.muted, maxRotation: 0, autoSkip: false, callback: v => (byDate ? fmtDate(v) : treatMode() ? `${v}` : `Day ${v}`) },
     title: { display: treatMode(), text: 'Days from treatment start', color: t.ink2 },
     grid: { color: t.grid },
     border: { color: t.axis },
   };
+}
+
+// Sessions are unevenly spaced, so Chart.js's autoSkip lets close labels run into each other ("Nov 5Nov 6").
+// Blank the labels that would touch, keeping the latest one and going back in time; every session keeps its grid line.
+function thinLabels(axis) {
+  const ticks = axis.ticks;
+  if (ticks.length < 2 || !(axis.max > axis.min)) return;
+  const ctx = axis.ctx;
+  ctx.save();
+  ctx.font = Chart.helpers.toFont(axis.options.ticks.font).string;
+  const widths = ticks.map(tk => ctx.measureText(String(tk.label ?? '')).width);
+  ctx.restore();
+  const W = axis.maxWidth || axis.chart.width;
+  const px = v => ((v - axis.min) / (axis.max - axis.min)) * W;
+  const gap = fz(10);
+  let left = Infinity;
+  for (let i = ticks.length - 1; i >= 0; i--) {
+    const c = px(ticks[i].value);
+    if (c + widths[i] / 2 + gap <= left) left = c - widths[i] / 2;
+    else ticks[i].label = '';
+  }
 }
 
 // Log ticks: label only 1, 2 and 5 × 10^n so the axis stays readable.
@@ -1843,7 +1865,13 @@ function renderLatestBars(root, t, d, id, metric, title) {
   opts.interaction = { mode: 'index', axis: 'x', intersect: false };
   opts.scales.x = {
     type: 'category',
-    ticks: { color: t.muted, autoSkip: false, maxRotation: 90, minRotation: 0, font: { size: 11 } },
+    ticks: { color: t.muted, autoSkip: false, maxRotation: 90, minRotation: 0, font: { size: fz(11) } },
+    // Chart.js tilts the mouse IDs only as far as their width needs; with many bars the tilted labels still touch,
+    // so stand them upright when a bar is narrower than about 1.5 lines of text.
+    afterCalculateLabelRotation: axis => {
+      const step = (axis.maxWidth || axis.width) / Math.max(axis.ticks.length, 1);
+      if (axis.labelRotation > 0 && step < fz(11) * 1.5) axis.labelRotation = 90;
+    },
     grid: { display: false },
     border: { color: t.axis },
   };
