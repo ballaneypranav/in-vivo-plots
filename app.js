@@ -1144,6 +1144,7 @@ const state = {
   moreSettings: false, // phone: the toolbar's less-used settings unfolded
   slide: null,      // { id, from } while the slide image dialog is open
   chartFont: 12,    // chart text size the views were drawn with (chartFont)
+  exporting: false, // drawing a slide image: legends leave out hidden groups and cages
 };
 
 const savePrefs = () => store.set(STORE_PREFS, JSON.stringify(state.prefs));
@@ -1355,6 +1356,8 @@ const endLabels = {
 // Lane height: tighter on short (phone) charts so a strip of several lanes leaves room for the plot.
 const doseLaneBase = chart => (chart.height < 340 * fz(1) ? 8 : 11);
 const doseLane = chart => fz(doseLaneBase(chart));
+// Space above the lanes, so "Dose" clears the lowest y tick label, which is centred on the bottom of the plot.
+const doseGap = chart => Math.max(fz(3), fz(6 + 5 + 2) - ((chart.$doseBox?.opts.lanes || []).length * doseLane(chart)) / 2);
 const doseText = it => [it.drug, it.dose, it.volume ? `${it.volume} µL` : '', it.route].filter(Boolean).join(' · ');
 const doseCount = (it, eligible) => (it.mice.length >= eligible ? `${it.mice.length} mice` : `${it.mice.length} of ${eligible} mice`);
 
@@ -1376,7 +1379,7 @@ const doseStrip = {
       update(maxWidth) {
         const n = (box.opts.lanes || []).length;
         box.width = maxWidth;
-        box.height = n ? fz(6) + n * doseLane(chart) : 0;
+        box.height = n ? doseGap(chart) + fz(3) + n * doseLane(chart) : 0;
       },
       draw() { drawDoseLanes(chart, box); },
     };
@@ -1469,7 +1472,7 @@ function drawDoseLanes(chart, box) {
   const x = chart.scales.x;
   const lane = doseLane(chart);
   ctx.save();
-  const top = box.top + fz(3);
+  const top = box.top + doseGap(chart);
   ctx.font = sysFont(10);
   ctx.fillStyle = o.muted;
   ctx.textAlign = 'right';
@@ -1648,12 +1651,13 @@ function addDoses(opts, t, d, lanes, extraXs = [], metric = null) {
 const DOSE_KEY = '▲ dose (tap or hover the strip for the drug)';
 
 // Legend with one entry per cage; hidden cages are struck through. Clicking an entry shows or hides the cage.
+// On a slide image hidden cages are left out (colors still follow the full cage list).
 function cageLegend(t, d, pointStyle = 'circle') {
   return {
     generateLabels: () => d.cages.map((c, k) => ({
       text: cageName(d, c), fillStyle: seriesStyle(t, k).color, strokeStyle: seriesStyle(t, k).color,
       fontColor: t.ink2, pointStyle, lineWidth: 0, hidden: !shownCages(d).includes(c), cage: c,
-    })),
+    })).filter(item => !(state.exporting && item.hidden)),
     onClick: (_e, item) => toggleCage(item.cage),
   };
 }
@@ -3033,6 +3037,27 @@ function thicken(chart, k) {
   }
 }
 
+/** Split a y axis title longer than its axis into two lines at the space nearest the middle; true if any changed. */
+function wrapAxisTitles(chart) {
+  let changed = false;
+  for (const scale of Object.values(chart.scales)) {
+    const o = scale.options.title;
+    if (scale.isHorizontal() || !o || !o.display || typeof o.text !== 'string' || !o.text.includes(' ')) continue;
+    chart.ctx.save();
+    chart.ctx.font = Chart.helpers.toFont(o.font).string;
+    const wide = chart.ctx.measureText(o.text).width > scale.height;
+    chart.ctx.restore();
+    if (!wide) continue;
+    const mid = o.text.length / 2;
+    let at = -1;
+    for (let i = 0; i < o.text.length; i++) if (o.text[i] === ' ' && (at < 0 || Math.abs(i - mid) < Math.abs(at - mid))) at = i;
+    const opt = chart.options.scales[scale.id].title;
+    opt.text = [o.text.slice(0, at), o.text.slice(at + 1)];
+    changed = true;
+  }
+  return changed;
+}
+
 /** Draw chart `id` off screen at w × h with theme t and slide text sizes; its pixels at SLIDE_SCALE×, or null. */
 function renderOffscreen(id, w, h, t) {
   const host = document.createElement('div');
@@ -3046,6 +3071,7 @@ function renderOffscreen(id, w, h, t) {
   state.expanded = null;
   Chart.defaults.font.size = SLIDE_FONT;
   Chart.defaults.color = t.ink2;
+  state.exporting = true;
   try {
     chartRenderers(state.derived)[id](host, t);
     const view = state.views[id];
@@ -3055,12 +3081,14 @@ function renderOffscreen(id, w, h, t) {
     chart.options.devicePixelRatio = SLIDE_SCALE;
     chart.resize(w, h);
     chart.update('none');
+    if (wrapAxisTitles(chart)) chart.update('none');
     const out = document.createElement('canvas');
     out.width = chart.canvas.width;
     out.height = chart.canvas.height;
     out.getContext('2d').drawImage(chart.canvas, 0, 0);
     return { canvas: out, title: view.title, w, h };
   } finally {
+    state.exporting = false;
     state.charts.forEach(c => c.destroy());
     state.views = saved.views;
     state.charts = saved.charts;
