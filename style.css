@@ -541,10 +541,50 @@ body.panel-open::before { content: ""; position: fixed; inset: 0; background: va
   .chart { height: max(220px, calc(100vh - 120px)); }
 }
 
+/* Slide image dialog: options, a preview on a 16:9 slide, copy or download. */
+body.slide-open { overflow: hidden; }
+body.slide-open::before { content: ""; position: fixed; inset: 0; background: var(--scrim); z-index: 31; }
+.slide-panel {
+  position: fixed; inset: 0; z-index: 32; overflow: auto;
+  padding: 14px 12px calc(14px + env(safe-area-inset-bottom));
+  background: var(--surface); color: var(--ink);
+}
+.slide-panel[hidden] { display: none; }
+.sp-opts { display: flex; flex-wrap: wrap; gap: 8px 16px; margin: 0 4px 12px; }
+.sp-opts .seg { flex-wrap: wrap; max-width: 100%; }
+.sp-opts .seg-buttons { flex-wrap: wrap; max-width: 100%; }
+.sp-stage { padding: 12px; background: var(--page); border-radius: 10px; }
+.sp-slide {
+  position: relative; aspect-ratio: 16 / 9; width: 100%; margin: 0 auto;
+  background: #fff; box-shadow: 0 2px 12px rgba(0, 0, 0, 0.18);
+  background-image: repeating-conic-gradient(#f0f0ee 0 25%, #fff 0 50%); background-size: 16px 16px;
+}
+.sp-slide.dark { background: #1a1a19; }
+.sp-slide img { position: absolute; display: block; }
+.sp-title {
+  position: absolute; left: 3.75%; top: 5.5%; width: 92.5%; height: 11%;
+  display: flex; align-items: center; padding-left: 1%; border: 1px dashed #b5b4ad; border-radius: 4px;
+  color: #898781; font-size: clamp(0.7rem, 2vw, 1.2rem);
+}
+.slide-panel .gp-actions { align-items: center; margin: 12px 4px 0; }
+.slide-panel .gp-note { margin: 0 0 0 4px; }
+@media (min-width: 700px) {
+  .slide-panel {
+    inset: 24px; max-width: 1100px; margin: 0 auto;
+    border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 12px 48px rgba(0, 0, 0, 0.3); padding: 16px 20px;
+  }
+  .sp-slide { width: min(100%, calc((100vh - 300px) * 16 / 9)); }
+}
+/* Charts drawn off screen for a slide image (app.js renderOffscreen). */
+.export-host { position: fixed; left: -99999px; top: 0; visibility: hidden; pointer-events: none; }
+.export-host .card { padding: 0; border: 0; background: none; }
+.export-host .card-head, .export-host .empty { display: none; }
+.export-host .chart, .export-host .chart-card .chart { flex: none; height: var(--h); min-height: 0; }
+
 @media print {
   @page { size: landscape; margin: 10mm; }
   body { max-width: none; padding: 0; background: #fff; }
-  .actions, .toolbar, .jump, .tools, .card-tools, footer, .toast, .warnings, .hint, .group-panel { display: none !important; }
+  .actions, .toolbar, .jump, .tools, .card-tools, footer, .toast, .warnings, .hint, .group-panel, .slide-panel { display: none !important; }
   body.panel-open::before { display: none; }
   #views { display: grid; grid-template-columns: 1fr 1fr; grid-template-areas: none; gap: 8px; }
   #views > section { grid-area: auto; break-inside: avoid; }

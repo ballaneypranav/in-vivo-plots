@@ -1110,6 +1110,10 @@ const PREF_VALUES = {
   // Aggregate and color by the workbook's groups, the current cage, or the user's own groups (this device).
   // Falls back when the chosen one isn't there (see effectiveBy).
   by: ['group', 'cage', 'mine'],
+  // Slide images (see SLIDE_SIZES): size, background and whether the chart title is on the image.
+  slideSize: ['content', 'full', 'half', 'pair'],
+  slideBg: ['light', 'dark', 'none'],
+  slideTitle: ['off', 'on'],
 };
 const SORT_KEYS = ['id', 'where', 'start', 'tday', 'weight', 'pct', 'volume', 'rtv', 'flags'];
 
@@ -1138,6 +1142,7 @@ const state = {
   parsed: null,     // parse output, for the workbook's Mice order
   jumpTo: null,     // card last picked in the jump bar, to tell apart cards that share a row
   moreSettings: false, // phone: the toolbar's less-used settings unfolded
+  slide: null,      // { id, from } while the slide image dialog is open
   chartFont: 12,    // chart text size the views were drawn with (chartFont)
 };
 
@@ -1635,13 +1640,16 @@ const ICONS = {
   copy: '<rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 3.5v-1h-8v8h1"/>',
   csv: '<rect x="2.5" y="3" width="11" height="10" rx="1.5"/><path d="M2.5 6.5h11M2.5 9.75h11M6.5 6.5V13"/>',
   expand: '<path d="M2.5 6V2.5H6M10 2.5h3.5V6M13.5 10v3.5H10M6 13.5H2.5V10"/>',
+  slide: '<rect x="1.5" y="2.5" width="13" height="8.5" rx="1.2"/><path d="M8 11v2.5M5 13.5h6M4.5 8.5l2.5-2.5 2 1.5 2.5-3"/>',
+  close: '<path d="M4 4l8 8M12 4l-8 8"/>',
   collapse: '<path d="M6 2.5V6H2.5M13.5 6H10V2.5M10 13.5V10h3.5M2.5 10H6v3.5"/>',
 };
 const icon = name => `<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">${ICONS[name]}</svg>`;
 const TOOL_TIPS = {
-  png: 'Download PNG', copy: 'Copy image', tsv: 'Copy as a table (paste into Excel or Prism)', csv: 'Download CSV',
+  png: 'Download PNG', copy: 'Copy as a slide image (16:9), with the last slide settings',
+  slide: 'Slide image for PowerPoint: size, background, preview, copy or download', tsv: 'Copy as a table (paste into Excel or Prism)', csv: 'Download CSV',
 };
-const CHART_TOOLS = ['png', 'copy', 'csv', 'expand'];
+const CHART_TOOLS = ['slide', 'copy', 'csv', 'expand'];
 const TABLE_TOOLS = ['tsv', 'csv', 'expand'];
 
 function card(id, title, subtitle, tools, { extra = '', hint = '' } = {}) {
@@ -2268,6 +2276,22 @@ function renderKpis(d) {
   box.hidden = false;
 }
 
+/** The chart views by card id, each drawing its card into `root` with theme `t` (also used for slide images). */
+function chartRenderers(d) {
+  const w = state.prefs.weight;
+  const tm = state.prefs.tumor;
+  const by = `by ${d.unit}`;
+  return {
+    'weight-group': (root, t) => renderGroupChart(root, t, d, 'weight-group', w, w === 'pct' ? `Body weight change ${by}` : `Body weight ${by}`),
+    'weight-mice': (root, t) => renderMiceChart(root, t, d, 'weight-mice', w, w === 'pct' ? 'Individual body weight change' : 'Individual body weights'),
+    'weight-latest': (root, t) => renderLatestBars(root, t, d, 'weight-latest', w, `${w === 'pct' ? 'Weight change' : 'Body weight'} per mouse`),
+    'tumor-group': (root, t) => renderGroupChart(root, t, d, 'tumor-group', tm, tm === 'rtv' ? `Relative tumor volume ${by}` : `Tumor volume ${by}`),
+    'tumor-mice': (root, t) => renderMiceChart(root, t, d, 'tumor-mice', tm, tm === 'rtv' ? 'Individual relative tumor volumes' : 'Individual tumor volumes'),
+    'tumor-latest': (root, t) => renderLatestBars(root, t, d, 'tumor-latest', tm, `${tm === 'rtv' ? 'Relative tumor volume' : 'Tumor volume'} per mouse`),
+    survival: (root, t) => renderSurvival(root, t, d),
+  };
+}
+
 /** Draw every view into #views from state.derived and state.prefs. */
 function renderViews() {
   const d = state.derived;
@@ -2283,16 +2307,8 @@ function renderViews() {
   Chart.defaults.font.family = 'system-ui, -apple-system, "Segoe UI", sans-serif';
   Chart.defaults.font.size = state.chartFont = chartFont();
   Chart.defaults.color = t.ink2;
-  const w = state.prefs.weight;
-  const tm = state.prefs.tumor;
-  const by = `by ${d.unit}`;
-  renderGroupChart(root, t, d, 'weight-group', w, w === 'pct' ? `Body weight change ${by}` : `Body weight ${by}`);
-  renderMiceChart(root, t, d, 'weight-mice', w, w === 'pct' ? 'Individual body weight change' : 'Individual body weights');
-  renderLatestBars(root, t, d, 'weight-latest', w, `${w === 'pct' ? 'Weight change' : 'Body weight'} per mouse`);
-  renderGroupChart(root, t, d, 'tumor-group', tm, tm === 'rtv' ? `Relative tumor volume ${by}` : `Tumor volume ${by}`);
-  renderMiceChart(root, t, d, 'tumor-mice', tm, tm === 'rtv' ? 'Individual relative tumor volumes' : 'Individual tumor volumes');
-  renderLatestBars(root, t, d, 'tumor-latest', tm, `${tm === 'rtv' ? 'Relative tumor volume' : 'Tumor volume'} per mouse`);
-  renderSurvival(root, t, d);
+  const charts = chartRenderers(d);
+  CHART_IDS.forEach(id => charts[id](root, t));
   renderLatestTable(root, d);
   renderHeatmap(root, d);
   renderSchedule(root, d);
@@ -2875,6 +2891,242 @@ function dashboardFigure(scale = 2) {
   return canvas;
 }
 
+/* ---------------------------------------------------------- slide images */
+// Charts drawn for a 16:9 slide (13.33 × 7.5 in), whatever the screen: each chart is drawn again off screen at a fixed
+// size in px at 96 per inch, with text SLIDE_FONT px (about 15 pt on the slide) and thicker lines, at SLIDE_SCALE× (240
+// dpi). The PNG says 240 dpi, so PowerPoint places it at that size. `pair` puts the weight and tumor charts side by side.
+const SLIDE_SIZES = {
+  content: { w: 1184, h: 528, label: 'Under a title', tip: 'The area under a slide title, 12.3 × 5.5 in' },
+  full: { w: 1280, h: 720, label: 'Full slide', tip: 'The whole slide, 13.3 × 7.5 in' },
+  half: { w: 576, h: 528, label: 'Half', tip: 'Half the area under a slide title (two charts side by side), 6 × 5.5 in' },
+  pair: { w: 1184, h: 528, label: 'Two charts', tip: 'Weight and tumor side by side (survival: tumor and survival), under a slide title' },
+};
+// Where each size sits on the slide (px at 96 per inch), for the preview.
+const SLIDE_PLACE = { content: [48, 144], full: [0, 0], half: [48, 144], pair: [48, 144] };
+const SLIDE_FONT = 20;
+const SLIDE_SCALE = 2.5;
+const SLIDE_DPI = 96 * SLIDE_SCALE;
+const SLIDE_PAIR = { 'weight-group': 'tumor-group', 'weight-mice': 'tumor-mice', 'weight-latest': 'tumor-latest', survival: 'tumor-group' };
+// The Export menu's weight + tumor slide opens the dialog at "Two charts" without changing the saved size, so the
+// charts' quick copy keeps the size last picked in the dialog.
+const slideSize = () => (state.slide && state.slide.size) || state.prefs.slideSize;
+const slideOpts = (dialog = false) => ({
+  size: dialog ? slideSize() : state.prefs.slideSize, bg: state.prefs.slideBg, title: state.prefs.slideTitle === 'on',
+});
+
+/** The charts on the slide: just `id`, or for `pair` it and its counterpart, weight (or tumor, before survival) first. */
+function slideIds(id, size) {
+  const other = SLIDE_PAIR[id] || Object.keys(SLIDE_PAIR).find(k => SLIDE_PAIR[k] === id);
+  const has = k => Boolean(state.views[k] && state.views[k].chart);
+  if (size !== 'pair' || !other || !has(other)) return [id];
+  return id.startsWith('weight') ? [id, other] : [other, id];
+}
+
+/** Theme colors of `name` (light or dark), whatever the page shows. No paint happens in between, so nothing flickers. */
+function themeFor(name) {
+  const root = document.documentElement;
+  const prev = root.dataset.theme;
+  root.dataset.theme = name;
+  try { return theme(); } finally { if (prev === undefined) delete root.dataset.theme; else root.dataset.theme = prev; }
+}
+
+/** Thicker lines and markers for a slide: scale each dataset's sizes (numbers, arrays or functions) by k. */
+function thicken(chart, k) {
+  for (const ds of chart.data.datasets) {
+    for (const key of ['borderWidth', '$width', 'pointRadius', 'pointHoverRadius', 'pointBorderWidth', 'maxBarThickness']) {
+      const v = ds[key];
+      if (typeof v === 'number') ds[key] = v * k;
+      else if (Array.isArray(v)) ds[key] = v.map(x => x * k);
+      else if (typeof v === 'function') ds[key] = (...a) => v(...a) * k;
+    }
+  }
+}
+
+/** Draw chart `id` off screen at w × h with theme t and slide text sizes; its pixels at SLIDE_SCALE×, or null. */
+function renderOffscreen(id, w, h, t) {
+  const host = document.createElement('div');
+  host.className = 'export-host';
+  host.style.width = `${w}px`;
+  host.style.setProperty('--h', `${h}px`);
+  document.body.appendChild(host);
+  const saved = { views: state.views, charts: state.charts, expanded: state.expanded, size: Chart.defaults.font.size, color: Chart.defaults.color };
+  state.views = {};
+  state.charts = [];
+  state.expanded = null;
+  Chart.defaults.font.size = SLIDE_FONT;
+  Chart.defaults.color = t.ink2;
+  try {
+    chartRenderers(state.derived)[id](host, t);
+    const view = state.views[id];
+    if (!view || !view.chart) return null;
+    const chart = view.chart;
+    thicken(chart, 1.5);
+    chart.options.devicePixelRatio = SLIDE_SCALE;
+    chart.resize(w, h);
+    chart.update('none');
+    const out = document.createElement('canvas');
+    out.width = chart.canvas.width;
+    out.height = chart.canvas.height;
+    out.getContext('2d').drawImage(chart.canvas, 0, 0);
+    return { canvas: out, title: view.title, w, h };
+  } finally {
+    state.charts.forEach(c => c.destroy());
+    state.views = saved.views;
+    state.charts = saved.charts;
+    state.expanded = saved.expanded;
+    Chart.defaults.font.size = saved.size;
+    Chart.defaults.color = saved.color;
+    host.remove();
+  }
+}
+
+/** The slide image of chart `id`: { size, bg: light | dark | none, title: chart title and source line on the image }. */
+function slideFigure(id, { size, bg, title }) {
+  const S = SLIDE_SIZES[size] || SLIDE_SIZES.content;
+  const t = themeFor(bg === 'dark' ? 'dark' : 'light');
+  const ids = slideIds(id, size);
+  const gap = 32;
+  const head = title ? 52 : 0;
+  const foot = title ? 26 : 0;
+  const cw = Math.floor((S.w - gap * (ids.length - 1)) / ids.length);
+  const figs = ids.map(k => renderOffscreen(k, cw, S.h - head - foot, t)).filter(Boolean);
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.round(S.w * SLIDE_SCALE);
+  canvas.height = Math.round(S.h * SLIDE_SCALE);
+  const ctx = canvas.getContext('2d');
+  ctx.scale(SLIDE_SCALE, SLIDE_SCALE);
+  if (bg !== 'none') {
+    ctx.fillStyle = bg === 'dark' ? t.surface : '#ffffff';
+    ctx.fillRect(0, 0, S.w, S.h);
+  }
+  ctx.textBaseline = 'top';
+  figs.forEach((f, i) => {
+    const x = i * (cw + gap);
+    if (title) {
+      ctx.fillStyle = t.ink;
+      ctx.font = `600 26px system-ui, -apple-system, "Segoe UI", sans-serif`;
+      ctx.textBaseline = 'alphabetic';
+      ctx.fillText(f.title, x + 12, 36, cw - 24);
+      ctx.textBaseline = 'top';
+    }
+    ctx.drawImage(f.canvas, x, head, f.w, f.h);
+  });
+  if (title) {
+    ctx.fillStyle = t.muted;
+    ctx.font = '14px system-ui, -apple-system, "Segoe UI", sans-serif';
+    ctx.fillText(`${state.name} · exported ${new Date().toLocaleDateString(undefined, { dateStyle: 'medium' })}`, 12, S.h - foot + 6, S.w - 24);
+  }
+  return canvas;
+}
+
+// PNG with a pHYs chunk (pixels per metre), so slide software places it at its physical size.
+const CRC_TABLE = (() => {
+  const tb = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; tb[n] = c >>> 0; }
+  return tb;
+})();
+function crc32(bytes) {
+  let c = 0xffffffff;
+  for (const b of bytes) c = CRC_TABLE[(c ^ b) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+async function pngAtDpi(canvas, dpi) {
+  const png = new Uint8Array(await (await canvasBlob(canvas)).arrayBuffer());
+  const ppm = Math.round(dpi / 0.0254);
+  const chunk = new Uint8Array(21);
+  const v = new DataView(chunk.buffer);
+  v.setUint32(0, 9);
+  chunk.set([0x70, 0x48, 0x59, 0x73], 4); // "pHYs"
+  v.setUint32(8, ppm);
+  v.setUint32(12, ppm);
+  chunk[16] = 1; // unit: metre
+  v.setUint32(17, crc32(chunk.subarray(4, 17)));
+  const at = 33; // after the signature (8 bytes) and IHDR (25)
+  return new Blob([png.subarray(0, at), chunk, png.subarray(at)], { type: 'image/png' });
+}
+const slidePng = (id, o = slideOpts()) => pngAtDpi(slideFigure(id, o), SLIDE_DPI);
+
+/* The slide dialog: size, background and title, a preview on a 16:9 slide, copy or download. */
+function openSlide(id, size) {
+  state.slide = { id, from: document.activeElement, size: PREF_VALUES.slideSize.includes(size) ? size : null };
+  renderSlidePanel();
+  const close = document.querySelector('#slide-panel [data-slide-close]');
+  if (close) close.focus();
+}
+
+function closeSlide() {
+  const from = state.slide && state.slide.from;
+  state.slide = null;
+  renderSlidePanel();
+  if (from && from.isConnected) from.focus();
+}
+
+function renderSlidePanel() {
+  let el = document.getElementById('slide-panel');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'slide-panel';
+    el.className = 'slide-panel';
+    el.setAttribute('role', 'dialog');
+    el.setAttribute('aria-modal', 'true');
+    el.setAttribute('aria-labelledby', 'slide-panel-title');
+    document.body.appendChild(el);
+  }
+  const s = state.slide;
+  document.body.classList.toggle('slide-open', Boolean(s));
+  if (!s || !state.derived || !state.views[s.id]) { el.hidden = true; el.innerHTML = ''; return; }
+  const p = { ...state.prefs, slideSize: slideSize() };
+  const seg = (key, label, options) => `<div class="seg" role="group" aria-label="${label}"><span class="seg-label">${label}</span><div class="seg-buttons">${
+    options.map(([v, text, tip]) => `<button type="button" data-slide-pref="${key}" data-value="${v}" aria-pressed="${p[key] === v}"${
+      tip ? ` title="${tip}"` : ''}>${text}</button>`).join('')}</div></div>`;
+  const ids = slideIds(s.id, p.slideSize);
+  const S = SLIDE_SIZES[p.slideSize];
+  const [x, y] = SLIDE_PLACE[p.slideSize];
+  const pct = (a, b) => `${((a / b) * 100).toFixed(3)}%`;
+  el.innerHTML = `<div class="gp-head"><div class="titles"><h2 id="slide-panel-title">Slide image</h2><p class="sub">${
+    escapeHtml(ids.map(k => state.views[k].title).join(' + '))}. Drawn for a 16:9 slide with text about 15 pt. The downloaded PNG inserts into PowerPoint at the size shown; a pasted copy keeps its shape but may need resizing.</p></div>
+    <button type="button" class="tool" data-slide-close title="Close (Esc)" aria-label="Close">${icon('close')}</button></div>
+    <div class="sp-opts">${seg('slideSize', 'Size', Object.entries(SLIDE_SIZES).map(([k, v]) => [k, v.label, v.tip]))}${
+    seg('slideBg', 'Background', [['light', 'White'], ['dark', 'Dark'], ['none', 'None', 'Transparent, for a slide with its own background (dark text)']])}${
+    seg('slideTitle', 'Title', [['off', 'Off', 'The slide’s own title says what this is'], ['on', 'On', 'The chart title on the image, and the file name and date at the bottom']])}</div>
+    <div class="sp-stage"><div class="sp-slide${p.slideBg === 'dark' ? ' dark' : ''}">${
+    p.slideSize === 'full' ? '' : '<div class="sp-title">Slide title</div>'}<img alt="Preview of the slide image" style="left:${pct(x, 1280)};top:${
+    pct(y, 720)};width:${pct(S.w, 1280)};height:${pct(S.h, 720)}"></div></div>
+    <div class="gp-actions"><button type="button" class="button primary small" data-slide-do="copy">Copy image</button>
+    <button type="button" class="button small" data-slide-do="png">Download PNG</button>
+    <span class="gp-note">${(S.w / 96).toFixed(1)} × ${(S.h / 96).toFixed(1)} in, ${Math.round(S.w * SLIDE_SCALE)} × ${Math.round(S.h * SLIDE_SCALE)} px</span></div>`;
+  el.hidden = false;
+  try {
+    el.querySelector('img').src = slideFigure(s.id, slideOpts(true)).toDataURL('image/png');
+  } catch (e) {
+    toast(`Couldn’t draw the slide (${e.message || e}).`);
+  }
+}
+
+async function slideClick(el) {
+  if (el.dataset.slideClose !== undefined) { closeSlide(); return; }
+  if (el.dataset.slidePref) {
+    const { slidePref: key, value } = el.dataset;
+    if (!PREF_VALUES[key].includes(value)) return;
+    state.prefs[key] = value;
+    if (key === 'slideSize') state.slide.size = null;
+    savePrefs();
+    renderSlidePanel();
+    const again = document.querySelector(`#slide-panel [data-slide-pref="${key}"][data-value="${value}"]`);
+    if (again) again.focus();
+    return;
+  }
+  const { id } = state.slide;
+  const o = slideOpts(true);
+  const name = fileName(`${slideIds(id, o.size).join('+')}-slide`, 'png');
+  try {
+    if (el.dataset.slideDo === 'copy') await copyImage(slidePng(id, o), name, 'Slide image copied. Paste it into PowerPoint.');
+    else if (el.dataset.slideDo === 'png') download(await slidePng(id, o), name);
+  } catch (e) {
+    toast(`Couldn’t do that here (${e.message || e}).`);
+  }
+}
+
 /** Long ("tidy") table of every measurement and derived value. */
 function allDataRows() {
   const d = state.base;
@@ -2893,13 +3145,15 @@ function allDataRows() {
   ];
 }
 
-async function copyImage(canvas, name) {
+/** Copy a PNG (a canvas, or a promise of a PNG blob) to the clipboard; download it where that isn't possible. */
+async function copyImage(image, name, done = 'Image copied. Paste it into a slide or document.') {
+  const blob = image instanceof HTMLCanvasElement ? canvasBlob(image) : image;
   try {
     if (!navigator.clipboard || typeof ClipboardItem === 'undefined') throw new Error('unsupported');
-    await navigator.clipboard.write([new ClipboardItem({ 'image/png': canvasBlob(canvas) })]);
-    toast('Image copied. Paste it into a slide or document.');
+    await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+    toast(done);
   } catch {
-    download(await canvasBlob(canvas), name);
+    download(await blob, name);
     toast('This browser can’t copy images, so the PNG was downloaded instead.');
   }
 }
@@ -2918,10 +3172,14 @@ async function runTool(id, tool) {
     } else if (tool === 'tsv') {
       await navigator.clipboard.writeText(toTsv(view.rows()));
       toast('Table copied. Paste it into Excel, Sheets or Prism.');
+    } else if (tool === 'slide' && view.chart) {
+      openSlide(id);
     } else if (tool === 'png' && view.chart) {
       download(await canvasBlob(chartFigure(id)), fileName(id, 'png'));
     } else if (tool === 'copy' && view.chart) {
-      await copyImage(chartFigure(id), fileName(id, 'png'));
+      const o = slideOpts();
+      await copyImage(slidePng(id, o), fileName(`${id}-slide`, 'png'),
+        `Copied for a slide (${SLIDE_SIZES[o.size].label.toLowerCase()}). Paste it into PowerPoint; the slide button changes the size.`);
     } else {
       toast('Nothing to export in this view yet.');
     }
@@ -2932,7 +3190,10 @@ async function runTool(id, tool) {
 
 async function runExport(kind) {
   if (!state.derived) return;
-  if (kind === 'png') download(await canvasBlob(dashboardFigure()), fileName('dashboard', 'png'));
+  if (kind === 'slide') {
+    const id = ['weight-group', 'tumor-group'].find(k => state.views[k] && state.views[k].chart);
+    if (id) openSlide(id, 'pair'); else toast('No charts to put on a slide yet.');
+  } else if (kind === 'png') download(await canvasBlob(dashboardFigure()), fileName('dashboard', 'png'));
   else if (kind === 'csv') download(new Blob([toCsv(allDataRows())], { type: 'text/csv' }), fileName('data', 'csv'));
   else if (kind === 'print') window.print();
 }
@@ -3083,6 +3344,8 @@ function init() {
     renderGroupPanel();
     state.focus = null;
     state.expanded = null;
+    state.slide = null;
+    renderSlidePanel();
     document.getElementById('toolbar').hidden = true;
     renderViews();
     renderWarnings([]);
@@ -3095,6 +3358,7 @@ function init() {
     const el = e.target.closest('button, tr[data-mouse]');
     if (!el || !state.derived) return;
     if (el.closest('#group-panel')) { panelClick(el); return; }
+    if (el.closest('#slide-panel')) { slideClick(el); return; }
     if (el.dataset.groupsOpen !== undefined) { openGroupPanel(true); return; }
     if (el.dataset.moreSettings !== undefined) { state.moreSettings = !state.moreSettings; syncToolbar(); return; }
     if (el.dataset.pref) setPref(el.dataset.pref, el.dataset.value);
@@ -3126,6 +3390,7 @@ function init() {
       if (e.target.dataset.label !== undefined) { e.preventDefault(); e.target.blur(); return; }
       if (e.target.dataset.min !== undefined) { e.preventDefault(); panelClick({ dataset: { pick: 'min' } }); return; }
     }
+    if (e.key === 'Escape' && state.slide) { closeSlide(); return; }
     if (e.key === 'Escape' && state.panel) { openGroupPanel(false); return; }
     if (e.key === 'Escape' && state.expanded) { runTool(state.expanded, 'expand'); return; }
     const row = e.target.closest && e.target.closest('tr[data-mouse]');
