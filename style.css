@@ -183,6 +183,23 @@ button:focus-visible, select:focus-visible, tr:focus-visible { outline: 2px soli
 @media (min-width: 700px) and (min-height: 501px) {
   .chip.more { display: none; }
 }
+/* Export menu: a chip that opens a short list of buttons. */
+.menu { position: relative; }
+.menu > summary { list-style: none; color: var(--ink); }
+.menu > summary::-webkit-details-marker { display: none; }
+.menu > summary::after { content: "▾"; font-size: 0.7em; color: var(--ink-2); }
+.menu[open] > summary { border-color: var(--accent); }
+.menu-list {
+  position: absolute; z-index: 25; top: calc(100% + 4px); right: 0; min-width: 13rem;
+  display: flex; flex-direction: column; padding: 4px;
+  background: var(--surface); border: 1px solid var(--axis); border-radius: 10px; box-shadow: 0 8px 28px rgba(0, 0, 0, 0.18);
+}
+.menu-list button {
+  min-height: 36px; padding: 0 10px; border: 0; border-radius: 6px; text-align: left;
+  background: transparent; color: var(--ink); font: inherit; font-size: 0.85rem; cursor: pointer; white-space: nowrap;
+}
+.menu-list button:hover, .menu-list button:focus-visible { background: var(--accent-wash); outline: none; }
+@media (max-width: 699px) { .menu-list { left: 0; right: auto; } }
 
 /* Jump bar: sticks to the top of the screen, one link per topic, the topic in view marked. Scrolls
    sideways on a phone. --top (set by app.js) is measured below it, so the dashboard rows allow for it. */

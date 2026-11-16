@@ -2408,11 +2408,12 @@ function renderToolbar(d) {
     ${hasStarts() ? segControl('base', 'Change from', [['first', 'First value', 'Weight % change and relative tumor volume from each mouse’s first measurement'],
       ['start', 'Treatment start', 'Weight % change and relative tumor volume from the last value on or before each mouse’s treatment start']]) : ''}
     <label class="seg"><span class="seg-label">Highlight</span><select id="focus-mouse"><option value="">No mouse</option>${mice}</select></label>
-    ${segControl('theme', 'Theme', [['auto', 'Auto'], ['light', 'Light'], ['dark', 'Dark']])}
-    <div class="seg" role="group" aria-label="Export"><span class="seg-label">Export</span><div class="seg-buttons">
-      <button type="button" data-export="png" title="All six charts in one PNG image">Dashboard</button>
-      <button type="button" data-export="csv" title="Every measurement and derived value as CSV, one row per mouse per session">Data</button>
-      <button type="button" data-export="print" title="Print, or save as PDF">Print</button></div></div>
+    <div class="seg"><span class="seg-label">Theme</span><button type="button" class="chip" data-pref="theme" data-cycle title="Switch between following the device, light and dark"></button></div>
+    <details class="menu seg"><summary class="chip">Export</summary><div class="menu-list" role="group" aria-label="Export">
+      <button type="button" data-export="slide" title="Body weight and tumor volume by ${d.unit}, side by side, as a 16:9 slide image">Slide: weight + tumor</button>
+      <button type="button" data-export="png" title="All the charts in one PNG image">Dashboard image</button>
+      <button type="button" data-export="csv" title="Every measurement and derived value as CSV, one row per mouse per session">All data (CSV)</button>
+      <button type="button" data-export="print" title="Print, or save as PDF">Print</button></div></details>
     </div>`;
   bar.hidden = false;
   syncToolbar();
@@ -2424,7 +2425,14 @@ function syncToolbar() {
   if (!d) return;
   const shown = shownCages(d);
   const current = key => (key === 'by' ? effectiveBy() : key === 'x' ? effX() : key === 'base' ? effBase() : state.prefs[key]);
-  bar.querySelectorAll('[data-pref]').forEach(b => b.setAttribute('aria-pressed', String(current(b.dataset.pref) === b.dataset.value)));
+  bar.querySelectorAll('[data-pref]:not([data-cycle])').forEach(b => b.setAttribute('aria-pressed', String(current(b.dataset.pref) === b.dataset.value)));
+  // Theme: one button that steps through the choices, naming the current one.
+  bar.querySelectorAll('[data-cycle]').forEach(b => {
+    const vals = PREF_VALUES[b.dataset.pref];
+    const now = state.prefs[b.dataset.pref];
+    b.dataset.value = vals[(vals.indexOf(now) + 1) % vals.length];
+    b.textContent = { auto: 'Auto', light: 'Light', dark: 'Dark' }[now] || now;
+  });
   bar.querySelectorAll('[data-cage]').forEach(b => b.setAttribute('aria-pressed', String(shown.includes(b.dataset.cage))));
   const all = bar.querySelector('[data-cage-all]');
   if (all) all.setAttribute('aria-pressed', String(shown.length === d.cages.length));
@@ -3355,6 +3363,10 @@ function init() {
 
   // One click handler for the toolbar and every card.
   document.addEventListener('click', e => {
+    // Close an open menu (Export) on any click outside it, or on a choice in it.
+    document.querySelectorAll('details.menu[open]').forEach(m => {
+      if (!m.contains(e.target) || e.target.closest('.menu-list button')) m.removeAttribute('open');
+    });
     const el = e.target.closest('button, tr[data-mouse]');
     if (!el || !state.derived) return;
     if (el.closest('#group-panel')) { panelClick(el); return; }
