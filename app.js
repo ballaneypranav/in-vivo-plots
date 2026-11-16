@@ -1663,7 +1663,8 @@ function card(id, title, subtitle, tools, { extra = '', hint = '' } = {}) {
   }).join('');
   sec.innerHTML = `<div class="card-head"><div class="titles"><h2 title="${escapeHtml(title)}">${title}</h2>${
     subtitle ? `<p class="sub" title="${escapeHtml(`${subtitle} ${hint}`.trim())}">${subtitle}${hint ? ` <span class="hint">${hint}</span>` : ''}</p>` : ''}</div>`
-    + `<div class="card-tools">${extra}<div class="tools">${buttons}</div></div></div>`;
+    + `<div class="card-tools">${extra}<div class="tools">${buttons}</div></div></div>`
+    + (state.expanded === id ? cardControls(id) : '');
   state.views[id] = { title, subtitle, rows: () => [] };
   return sec;
 }
@@ -2315,6 +2316,7 @@ function renderViews() {
   renderDoseCalendar(root, d);
   renderDoses(root, d);
   renderJump();
+  document.querySelectorAll('#views .card-controls').forEach(syncControls);
   setTop();
 }
 
@@ -2375,39 +2377,85 @@ function jump(id) {
 
 /* ---------------------------------------------------------------- toolbar */
 
-function renderToolbar(d) {
-  const bar = document.getElementById('toolbar');
-  const u = d.unit;
-  const chips = d.cages.map((c, k) => `<button type="button" class="chip" data-cage="${escapeHtml(c)}" title="Show or hide ${
-    escapeHtml(cageName(d, c))}. Double-click to show only this ${u}."><span class="dot" style="background:${seriesVar(k)}"></span>${
-    escapeHtml(cageText(d, c))}</button>`).join('');
+// Toolbar pieces, shared with the full-screen card (which shows only the settings that change it).
+function groupByControl(d) {
   const grouped = hasGroups();
   const byOptions = [
     hasStudyGroups() && ['group', 'Group', 'Groups from the Mice sheet of the workbook'],
     ['cage', 'Cage', 'Each mouse’s current cage, with its whole history'],
     grouped && ['mine', 'My groups', 'Your groups, set in the groups panel on this device'],
   ].filter(Boolean);
-  const groupBy = `<div class="seg" role="group" aria-label="Group by"><span class="seg-label">Group by</span>${byOptions.length > 1
+  return `<div class="seg" role="group" aria-label="Group by"><span class="seg-label">Group by</span>${byOptions.length > 1
     ? `<div class="seg-buttons">${byOptions.map(([v, text, tip]) => `<button type="button" data-pref="by" data-value="${v}" title="${tip}">${text}</button>`).join('')}</div>`
     : ''}<button type="button" class="chip edit" data-groups-open title="Pick mice and sort them into labelled groups, on this device">${grouped ? 'Edit my groups' : 'Make groups'}</button></div>`;
+}
+
+function cageChips(d) {
+  const u = d.unit;
+  const chips = d.cages.map((c, k) => `<button type="button" class="chip" data-cage="${escapeHtml(c)}" title="Show or hide ${
+    escapeHtml(cageName(d, c))}. Double-click to show only this ${u}."><span class="dot" style="background:${seriesVar(k)}"></span>${
+    escapeHtml(cageText(d, c))}</button>`).join('');
+  return `<div class="seg" role="group" aria-label="${u === 'group' ? 'Groups' : 'Cages'}"><span class="seg-label">${u === 'group' ? 'Groups' : 'Cages'}</span><div class="chips">${chips}<button type="button" class="chip all" data-cage-all>All</button></div></div>`;
+}
+
+/** The display settings by key, as toolbar controls. `focus` is the Highlight select (id only in the toolbar). */
+function prefControls(d, inToolbar = false) {
   const mice = d.cages.map(c => `<optgroup label="${escapeHtml(cageName(d, c))}">${
     d.mice.filter(m => m.cage === c).map(m => `<option value="${escapeHtml(m.id)}">${escapeHtml(m.id)}</option>`).join('')}</optgroup>`).join('');
+  return {
+    weight: segControl('weight', 'Weight', [['pct', '% change'], ['weight', 'Grams']]),
+    tumor: segControl('tumor', 'Tumor', [['volume', 'Volume'], ['rtv', 'Relative', 'Each mouse’s volume ÷ its first measured volume']]),
+    scale: segControl('scale', 'Tumor axis', [['linear', 'Linear'], ['log', 'Log']]),
+    error: segControl('error', 'Error bars', [['sem', 'SEM'], ['sd', 'SD'], ['none', 'None']]),
+    x: segControl('x', 'X axis', [['date', 'Date'], ['day', 'Day', 'Study day: days since the first session'],
+      ...(hasStarts() ? [['treat', 'From start', 'Days from each mouse’s treatment start (its own on the Mice sheet, else its group’s); day 0 lines the mice up']] : [])]),
+    base: hasStarts() ? segControl('base', 'Change from', [['first', 'First value', 'Weight % change and relative tumor volume from each mouse’s first measurement'],
+      ['start', 'Treatment start', 'Weight % change and relative tumor volume from the last value on or before each mouse’s treatment start']]) : '',
+    focus: `<label class="seg"><span class="seg-label">Highlight</span><select${inToolbar ? ' id="focus-mouse"' : ''} data-focus-select><option value="">No mouse</option>${mice}</select></label>`,
+  };
+}
+
+// The settings that change each card, shown with it in full screen. Every card also gets Group by and the chips.
+const CARD_CONTROLS = {
+  'weight-group': ['weight', 'error', 'x', 'base'],
+  'weight-mice': ['weight', 'x', 'base', 'focus'],
+  'weight-latest': ['weight', 'base', 'focus'],
+  'tumor-group': ['tumor', 'scale', 'error', 'x', 'base'],
+  'tumor-mice': ['tumor', 'scale', 'x', 'base', 'focus'],
+  'tumor-latest': ['tumor', 'scale', 'base', 'focus'],
+  survival: ['x'],
+  table: ['base', 'focus'],
+  grid: ['base', 'focus'],
+  schedule: [],
+  'dose-calendar': ['x', 'focus'],
+  doses: ['focus'],
+};
+
+function cardControls(id) {
+  const d = state.derived;
+  if (!d || !CARD_CONTROLS[id]) return '';
+  const c = prefControls(d);
+  return `<div class="card-controls" role="group" aria-label="Settings for this view">${groupByControl(d)}${cageChips(d)}${
+    CARD_CONTROLS[id].map(k => c[k]).join('')}</div>`;
+}
+
+function renderToolbar(d) {
+  const bar = document.getElementById('toolbar');
+  const c = prefControls(d, true);
   // On a phone only Group by and the group chips show until "More settings" unfolds the rest (CSS);
   // on wider screens .toolbar-more is display: contents, so its controls sit in the toolbar's own row.
   bar.innerHTML = `
-    ${groupBy}
-    <div class="seg" role="group" aria-label="${u === 'group' ? 'Groups' : 'Cages'}"><span class="seg-label">${u === 'group' ? 'Groups' : 'Cages'}</span><div class="chips">${chips}<button type="button" class="chip all" data-cage-all>All</button></div></div>
+    ${groupByControl(d)}
+    ${cageChips(d)}
     <button type="button" class="chip more" data-more-settings aria-controls="toolbar-more">More settings</button>
     <div class="toolbar-more" id="toolbar-more">
-    ${segControl('weight', 'Weight', [['pct', '% change'], ['weight', 'Grams']])}
-    ${segControl('tumor', 'Tumor', [['volume', 'Volume'], ['rtv', 'Relative', 'Each mouse’s volume ÷ its first measured volume']])}
-    ${segControl('scale', 'Tumor axis', [['linear', 'Linear'], ['log', 'Log']])}
-    ${segControl('error', 'Error bars', [['sem', 'SEM'], ['sd', 'SD'], ['none', 'None']])}
-    ${segControl('x', 'X axis', [['date', 'Date'], ['day', 'Day', 'Study day: days since the first session'],
-      ...(hasStarts() ? [['treat', 'From start', 'Days from each mouse’s treatment start (its own on the Mice sheet, else its group’s); day 0 lines the mice up']] : [])])}
-    ${hasStarts() ? segControl('base', 'Change from', [['first', 'First value', 'Weight % change and relative tumor volume from each mouse’s first measurement'],
-      ['start', 'Treatment start', 'Weight % change and relative tumor volume from the last value on or before each mouse’s treatment start']]) : ''}
-    <label class="seg"><span class="seg-label">Highlight</span><select id="focus-mouse"><option value="">No mouse</option>${mice}</select></label>
+    ${c.weight}
+    ${c.tumor}
+    ${c.scale}
+    ${c.error}
+    ${c.x}
+    ${c.base}
+    ${c.focus}
     <div class="seg"><span class="seg-label">Theme</span><button type="button" class="chip" data-pref="theme" data-cycle title="Switch between following the device, light and dark"></button></div>
     <details class="menu seg"><summary class="chip">Export</summary><div class="menu-list" role="group" aria-label="Export">
       <button type="button" data-export="slide" title="Body weight and tumor volume by ${d.unit}, side by side, as a 16:9 slide image">Slide: weight + tumor</button>
@@ -2420,9 +2468,14 @@ function renderToolbar(d) {
 }
 
 function syncToolbar() {
-  const bar = document.getElementById('toolbar');
+  syncControls(document.getElementById('toolbar'));
+  document.querySelectorAll('.card-controls').forEach(syncControls);
+}
+
+/** Pressed states, chips and the Highlight select of a set of controls (the toolbar or a full-screen card's). */
+function syncControls(bar) {
   const d = state.derived;
-  if (!d) return;
+  if (!d || !bar) return;
   const shown = shownCages(d);
   const current = key => (key === 'by' ? effectiveBy() : key === 'x' ? effX() : key === 'base' ? effBase() : state.prefs[key]);
   bar.querySelectorAll('[data-pref]:not([data-cycle])').forEach(b => b.setAttribute('aria-pressed', String(current(b.dataset.pref) === b.dataset.value)));
@@ -2436,8 +2489,7 @@ function syncToolbar() {
   bar.querySelectorAll('[data-cage]').forEach(b => b.setAttribute('aria-pressed', String(shown.includes(b.dataset.cage))));
   const all = bar.querySelector('[data-cage-all]');
   if (all) all.setAttribute('aria-pressed', String(shown.length === d.cages.length));
-  const sel = document.getElementById('focus-mouse');
-  if (sel) sel.value = state.focus || '';
+  bar.querySelectorAll('[data-focus-select]').forEach(sel => { sel.value = state.focus || ''; });
   bar.classList.toggle('open', state.moreSettings);
   const more = bar.querySelector('[data-more-settings]');
   if (more) {
@@ -3393,7 +3445,7 @@ function init() {
   });
   document.addEventListener('change', e => {
     if (e.target.closest && e.target.closest('#group-panel')) { panelChange(e); return; }
-    if (e.target.id === 'focus-mouse') setFocus(e.target.value);
+    if (e.target.dataset.focusSelect !== undefined) setFocus(e.target.value);
     else if (e.target.dataset.prefSelect) setPref(e.target.dataset.prefSelect, e.target.value);
   });
   document.addEventListener('input', e => { if (e.target.closest && e.target.closest('#group-panel')) panelInput(e); });
