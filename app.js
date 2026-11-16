@@ -1172,7 +1172,7 @@ function theme() {
   const v = name => cs.getPropertyValue(name).trim();
   return {
     page: v('--page'), surface: v('--surface'), ink: v('--ink'), ink2: v('--ink-2'), muted: v('--muted'),
-    grid: v('--grid'), axis: v('--axis'), warning: v('--warning'), critical: v('--critical'),
+    grid: v('--grid'), axis: v('--axis'), warning: v('--warning'), critical: v('--critical'), band: v('--band'),
     series: [1, 2, 3, 4, 5, 6, 7, 8].map(k => v(`--series-${k}`)),
   };
 }
@@ -1263,6 +1263,36 @@ const errBars = {
       });
       ctx.restore();
     });
+  },
+};
+
+// Shaded horizontal bands behind the data: options.plugins.bands = { color, labelColor, bands: [{ from, to, label }] }.
+// Used for the tumor volume range 50–100 (TUMOR_BAND) on the tumor volume charts.
+const TUMOR_BAND = { from: 50, to: 100, label: '50–100' };
+const bandNote = metric => (metric === 'volume' ? ` Shaded: volume ${TUMOR_BAND.label}.` : '');
+const bands = {
+  id: 'bands',
+  beforeDatasetsDraw(chart, _args, opts) {
+    const list = (opts && opts.bands) || [];
+    const { ctx, chartArea: a } = chart;
+    const y = chart.scales.y;
+    for (const b of list) {
+      const clamp = v => Math.max(a.top, Math.min(a.bottom, v));
+      const top = clamp(y.getPixelForValue(b.to));
+      const bottom = clamp(y.getPixelForValue(b.from));
+      if (bottom - top < 1) continue;
+      ctx.save();
+      ctx.fillStyle = opts.color;
+      ctx.fillRect(a.left, top, a.right - a.left, bottom - top);
+      if (b.label && bottom - top > fz(14)) {
+        ctx.font = sysFont(11);
+        ctx.fillStyle = opts.labelColor;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'top';
+        ctx.fillText(b.label, a.left + fz(4), top + fz(3));
+      }
+      ctx.restore();
+    }
   },
 };
 
@@ -1590,6 +1620,7 @@ function chartOptions(t, d, metric) {
         ] : [],
       },
       endLabels: { color: t.ink2 },
+      bands: { color: t.band, labelColor: t.muted, bands: metric === 'volume' ? [TUMOR_BAND] : [] },
       doses: { lanes: [], ink: t.ink, ink2: t.ink2, muted: t.muted, grid: t.grid, surface: t.surface, axis: t.axis },
     },
   };
@@ -1628,7 +1659,7 @@ function cageLegend(t, d, pointStyle = 'circle') {
 }
 
 function makeChart(canvas, config) {
-  const chart = new Chart(canvas, { ...config, plugins: [errBars, refLines, endLabels, doseStrip] });
+  const chart = new Chart(canvas, { ...config, plugins: [bands, errBars, refLines, endLabels, doseStrip] });
   state.charts.push(chart);
   return chart;
 }
@@ -1700,7 +1731,7 @@ function renderGroupChart(root, t, d, id, metric, title) {
   const left = treat ? d.mice.filter(m => shown.includes(m.cage) && !m.start).length : 0;
   const sub = `${errName() ? `Mean ± ${errName()}` : 'Mean'} of ${effBase() === 'start' && FROM_START[metric] ? FROM_START[metric].what : what}.${
     treat ? ` Day 0 is each mouse’s treatment start.${binDays() > 1 ? ` Days are grouped in ${binDays()}-day steps (measured every ${binDays()} days).` : ''}` : ''}${noStartNote(left)}${
-    noBaselineNote(d, metric, d.mice.filter(m => shown.includes(m.cage)))}${lanes.length ? ` ${DOSE_KEY}.` : ''}`;
+    noBaselineNote(d, metric, d.mice.filter(m => shown.includes(m.cage)))}${bandNote(metric)}${lanes.length ? ` ${DOSE_KEY}.` : ''}`;
   const sec = card(id, title, sub, CHART_TOOLS, { hint: `Click a ${d.unit} in the legend to hide it.` });
   root.appendChild(sec);
 
@@ -1784,7 +1815,7 @@ function renderMiceChart(root, t, d, id, metric, title) {
   const keys = [mice.some(m => m.points.some(p => p.moved)) && '◆ moved cage', mice.some(m => m.ended) && '✕ ended',
     lanes.length && DOSE_KEY].filter(Boolean);
   const sub = `One line per mouse.${treat ? ' Day 0 is each mouse’s treatment start.' : ''}${noStartNote(inShown.length - mice.length)}${
-    noBaselineNote(d, metric, mice)}${
+    noBaselineNote(d, metric, mice)}${bandNote(metric)}${
     keys.length ? ` ${keys.join(', ')}.` : ''}`;
   const sec = card(id, title, sub, CHART_TOOLS, { hint: 'Hover to pick out a mouse; click to highlight it everywhere.' });
   root.appendChild(sec);
@@ -1859,7 +1890,7 @@ function renderLatestBars(root, t, d, id, metric, title) {
   if (state.prefs.order === 'value') rows = [...rows].sort((a, b) => b[metric] - a[metric]);
   const left = all.length - rows.length;
   const sub = `Latest session, ${fmtDate(ts(d.latestDate), { month: 'short', day: 'numeric', year: 'numeric' })}.`
-    + (left ? ` ${left} ${left > 1 ? 'mice' : 'mouse'} not measured then ${left > 1 ? 'are' : 'is'} left out.` : '');
+    + (left ? ` ${left} ${left > 1 ? 'mice' : 'mouse'} not measured then ${left > 1 ? 'are' : 'is'} left out.` : '') + bandNote(metric);
   const order = segControl('order', 'Order', [['value', 'Sorted', 'Largest first'], ['mouse', 'Mouse', 'By cage and mouse']]);
   const sec = card(id, title, sub, CHART_TOOLS, { extra: order, hint: 'Click a bar to highlight the mouse.' });
   root.appendChild(sec);
