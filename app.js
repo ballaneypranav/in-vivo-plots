@@ -1623,10 +1623,10 @@ function chartOptions(t, d, metric) {
           title: items => pointTitle(items.length ? items[0].raw : null),
         },
       },
-      // The −15% and −20% lines are humane endpoints from the first weight, so they are left off a chart from treatment start.
+      // The −15% and −20% lines are drawn whichever baseline the chart uses (the table's loss flags stay on the first weight).
       refLines: {
         labelColor: t.ink2,
-        lines: metric === 'pct' && !d.rebased ? [
+        lines: metric === 'pct' ? [
           { y: LOSS_WARNING, color: t.warning, label: '−15%' },
           { y: LOSS_ALERT, color: t.critical, label: '−20%' },
         ] : [],
