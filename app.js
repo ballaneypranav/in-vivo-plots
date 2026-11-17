@@ -718,9 +718,9 @@ function rebase(d) {
 /**
  * Mean ± SEM of `metric` per day from treatment start, over the mice that have a start, each from its baseline session on (`inGroup`):
  * [{ day, mean, sem, n, dates, tdays }] by day, `dates` being the calendar dates and `tdays` the days from start that
- * went into it. With `bin` > 1 (the measurement cadence) days are grouped in steps of `bin`, rounding up (bin 2:
- * day 0 holds days −1 and 0, day 2 holds 1 and 2), so mice with different starts measured on the same calendar days
- * line up; each mouse then counts once per step, with its value nearest the step's day (the later one on a tie).
+ * went into it. With `bin` > 1 days are grouped in steps of `bin`, rounding up (bin 2: day 0 holds days −1 and 0,
+ * day 2 holds 1 and 2); each mouse then counts once per step, with its value nearest the step's day (the later one on
+ * a tie). The charts use exact days (bin 1), so the means sit on the same days as the individual lines.
  */
 function summarizeByTreatDay(members, metric, bin = 1) {
   const step = t => (bin > 1 ? Math.ceil(t / bin) * bin || 0 : t);
@@ -1215,9 +1215,6 @@ const hasStarts = () => Boolean(state.base && state.base.hasStarts);
 const effX = () => (state.prefs.x === 'treat' && !hasStarts() ? 'date' : state.prefs.x);
 const effBase = () => (state.prefs.base === 'start' && hasStarts() ? 'start' : 'first');
 const treatMode = () => effX() === 'treat';
-// From treatment start, means are taken in steps of the measurement cadence (Groups sheet), so staggered starts line up.
-const binDays = () => (treatMode() && state.base && state.base.cadence ? state.base.cadence.every : 1);
-const binDay = t => { const b = binDays(); return b > 1 ? Math.ceil(t / b) * b || 0 : t; };
 const xv = (d, k) => (effX() === 'day' ? d.days[k] : ts(d.dates[k]));
 // Wording that follows the baseline setting.
 const FROM_START = {
@@ -1508,7 +1505,7 @@ function drawDoseLanes(chart, box) {
 // x of any date on the date or study-day axis (an end date can fall between sessions).
 const xOfDate = (d, date) => (effX() === 'day' ? daysBetween(d.dates[0], date) : ts(date));
 
-// The x values that get a tick: the sessions, or with x = treatment, every day (or step, see binDays) from treatment
+// The x values that get a tick: the sessions, or with x = treatment, every day from treatment
 // start on which a shown mouse with a start has a value of `metric` (any weight or volume when none is given), so a
 // tumor chart does not reach back to sessions that only weighed the mice.
 const hasValue = metric => p => (metric ? p[metric] !== null && p[metric] !== undefined : p.weight !== null || p.volume !== null);
@@ -1520,12 +1517,12 @@ function tickXs(d, metric = null) {
     return d.dates.map((_, k) => k).filter(k => mice.some(m => m.points[k] && has(m.points[k]))).map(k => xv(d, k));
   }
   return [...new Set(d.mice.filter(m => m.start && shown.includes(m.cage))
-    .flatMap(m => m.points.filter(hasValue(metric)).map(p => binDay(p.tday))))].filter(keepX(d, metric)).sort((a, b) => a - b);
+    .flatMap(m => m.points.filter(hasValue(metric)).map(p => p.tday)))].filter(keepX(d, metric)).sort((a, b) => a - b);
 }
 
 /**
  * With x = days from treatment start, the days a time chart of `metric` keeps (as a test on x): from day 0 when the
- * days before it are hidden, and up to the last day (step, see binDays) of the shown group whose data ends first when
+ * days before it are hidden, and up to the last day of the shown group whose data ends first when
  * the days after it are hidden; a group with no data in range doesn't count. Every x otherwise.
  */
 function keepX(d, metric = null) {
@@ -1536,7 +1533,7 @@ function keepX(d, metric = null) {
     const has = hasValue(metric);
     for (const key of shownCages(d)) {
       const xs = d.mice.filter(m => m.cage === key && m.start)
-        .flatMap(m => m.points.filter(p => has(p) && inGroup(m, p.date)).map(p => binDay(p.tday))).filter(x => x >= lo);
+        .flatMap(m => m.points.filter(p => has(p) && inGroup(m, p.date)).map(p => p.tday)).filter(x => x >= lo);
       if (xs.length) hi = Math.min(hi, Math.max(...xs));
     }
   }
@@ -1547,11 +1544,7 @@ function keepX(d, metric = null) {
 function xScale(t, d, extraXs = [], metric = null, ticks = null) {
   const byDate = effX() === 'date';
   const xs = ticks || tickXs(d, metric);
-  // With binning the ticks are the steps, but each mouse's own line keeps its exact days: keep those in range too.
-  const exact = !ticks && treatMode() && binDays() > 1
-    ? d.mice.filter(m => m.start && shownCages(d).includes(m.cage)).flatMap(m => m.points.filter(hasValue(metric)).map(p => p.tday)).filter(keepX(d, metric))
-    : [];
-  const all = [...xs, ...extraXs, ...exact];
+  const all = [...xs, ...extraXs];
   if (!all.length) all.push(0);
   const lo = Math.min(...all);
   const hi = Math.max(...all);
@@ -1770,7 +1763,7 @@ function renderGroupChart(root, t, d, id, metric, title) {
   const keep = keepX(d, metric);
   const left = treat ? d.mice.filter(m => shown.includes(m.cage) && !m.start).length : 0;
   const sub = `${errName() ? `Mean ± ${errName()}` : 'Mean'} of ${effBase() === 'start' && FROM_START[metric] ? FROM_START[metric].what : what}.${
-    treat ? ` Day 0 is each mouse’s treatment start.${binDays() > 1 ? ` Days are grouped in ${binDays()}-day steps (measured every ${binDays()} days).` : ''}` : ''}${noStartNote(left)}${
+    treat ? ' Day 0 is each mouse’s treatment start.' : ''}${noStartNote(left)}${
     noBaselineNote(d, metric, d.mice.filter(m => shown.includes(m.cage)))}${bandNote(metric)}${lanes.length ? ` ${DOSE_KEY}.` : ''}`;
   const sec = card(id, title, sub, CHART_TOOLS, { hint: `Click a ${d.unit} in the legend to hide it.` });
   root.appendChild(sec);
@@ -1778,11 +1771,11 @@ function renderGroupChart(root, t, d, id, metric, title) {
   // Points per group or cage: { x, mean, sem, n, date, day } per session, or with x = treatment per day from start.
   const sessionXs = d.dates.map((_, k) => xv(d, k));
   const series = d.groups.map(g => (treat
-    ? summarizeByTreatDay(d.mice.filter(m => m.cage === g.cage), metric, binDays())
+    ? summarizeByTreatDay(d.mice.filter(m => m.cage === g.cage), metric)
       .filter(b => keep(b.day))
       .map(b => ({ ...b, x: b.day, tday: b.day, date: b.dates.length === 1 ? b.dates[0] : null }))
     : g[metric].map((p, i) => ({ ...p, x: sessionXs[i], day: d.days[i] }))));
-  // The x axis has a tick only where a shown group has a mean (with binning, its exact days stay in range).
+  // The x axis has a tick only where a shown group has a mean.
   const plotted = d.groups.flatMap((g, k) => (shown.includes(g.cage) ? series[k].filter(p => p.n > 0 && p.mean !== null) : []));
   if (!plotted.length) {
     empty(sec, M.tumor ? 'No tumor measurements yet.' : 'No measurements yet.');
