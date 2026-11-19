@@ -1108,8 +1108,8 @@ const PREF_VALUES = {
   tail: ['show', 'hide'],        // x = treatment: days after the shown group whose data ends first has its last value
   band: ['show', 'hide'],        // the shaded tumor volume range (TUMOR_BAND) on the tumor volume charts
   theme: ['auto', 'light', 'dark'],
+  tab: ['plots', 'injections'],  // the charts, or the schedule and injections (see effTab)
   order: ['value', 'mouse'],     // per-mouse bar charts
-  heat: ['pct', 'weight', 'volume', 'rtv'],
   // Aggregate and color by the workbook's groups, the current cage, or the user's own groups (this device).
   // Falls back when the chosen one isn't there (see effectiveBy).
   by: ['group', 'cage', 'mine'],
@@ -1121,7 +1121,6 @@ const PREF_VALUES = {
 // The chart cards, in page order, and the ones hidden until the Plots menu shows them: the per-mouse bars have no time axis.
 const CHART_IDS = ['weight-group', 'weight-mice', 'weight-latest', 'tumor-group', 'tumor-mice', 'tumor-latest', 'survival'];
 const HIDDEN_VIEWS = ['weight-latest', 'tumor-latest'];
-const SORT_KEYS = ['id', 'where', 'start', 'tday', 'weight', 'pct', 'volume', 'rtv', 'flags'];
 
 function loadPrefs() {
   let saved = {};
@@ -1130,8 +1129,6 @@ function loadPrefs() {
   for (const [k, vals] of Object.entries(PREF_VALUES)) prefs[k] = vals.includes(saved[k]) ? saved[k] : vals[0];
   for (const k of ['hidden', 'hiddenGroups']) prefs[k] = Array.isArray(saved[k]) ? saved[k].filter(c => typeof c === 'string') : [];
   prefs.hiddenViews = Array.isArray(saved.hiddenViews) ? saved.hiddenViews.filter(id => CHART_IDS.includes(id)) : [...HIDDEN_VIEWS];
-  const s = saved.sort || {};
-  prefs.sort = { key: SORT_KEYS.includes(s.key) ? s.key : 'id', dir: s.dir === -1 ? -1 : 1 };
   return prefs;
 }
 
@@ -1974,144 +1971,9 @@ function renderLatestBars(root, t, d, id, metric, title) {
   state.views[id].chart = makeChart(chartBox(sec), { type: 'bar', data: { labels: rows.map(r => r.id), datasets }, options: opts });
 }
 
-const FLAGS = {
-  'loss-alert': { cls: 'critical', icon: '⛔', text: 'Lost ≥ 20%', summary: 'lost ≥ 20%' },
-  'loss-warning': { cls: 'warning', icon: '⚠', text: 'Lost ≥ 15%', summary: 'lost ≥ 15%' },
-  ended: { cls: 'ended', icon: '✕', text: '', summary: 'ended (euthanized, found dead or removed)' },
-  missing: { cls: 'missing', icon: '○', text: 'No data since', summary: 'no data in the latest session' },
-};
-const FLAG_ORDER = ['loss-alert', 'loss-warning', 'ended', 'missing'];
-const FLAG_RANK = r => { const k = FLAG_ORDER.findIndex(f => r.flags.includes(f)); return k < 0 ? 0 : FLAG_ORDER.length - k; };
-const flagText = (r, f) => (f === 'ended' ? endText(r) : `${FLAGS[f].text}${f === 'missing' ? ` ${fmtDate(ts(r.lastSeen))}` : ''}`);
-
-const TABLE_COLS = [
-  { key: 'id', label: 'Mouse' },
-  { key: 'where', label: 'Cage · tail' },
-  { key: 'weight', label: 'Weight (g)', show: v => fmt(v, 2) },
-  { key: 'pct', label: 'Change', show: v => (v === null ? '—' : `${fmtSigned(v)}%`) },
-  { key: 'volume', label: 'Tumor vol.', show: v => fmt(v) },
-  { key: 'rtv', label: 'Rel. vol.', show: v => (v === null ? '—' : `${fmt(v, 2)}×`) },
-  { key: 'flags', label: 'Flags' },
-];
-// With treatment starts, each mouse's start and its days on treatment at the latest session come after Cage · tail.
-const START_COL = { key: 'start', label: 'Start', show: v => (v ? fmtDate(ts(v)) : '—') };
-const TDAY_COL = { key: 'tday', label: 'Days treated', show: v => (v === null ? '—' : v) };
-const tableCols = d => (d.hasStarts ? [...TABLE_COLS.slice(0, 2), START_COL, TDAY_COL, ...TABLE_COLS.slice(2)] : TABLE_COLS);
-
-function sortRows(d, rows) {
-  const { key, dir } = state.prefs.sort;
-  const val = r => (key === 'flags' ? FLAG_RANK(r) : key === 'start' ? (r.start ? ts(r.start) : null) : r[key]);
-  const pos = r => d.cages.indexOf(r.cage);
-  return [...rows].sort((a, b) => {
-    if (key === 'id') {
-      return dir * (pos(a) - pos(b) || byNatural(realCage(a), realCage(b)) || byNatural(a.mouse, b.mouse) || byNatural(a.id, b.id));
-    }
-    if (key === 'where') return dir * (byNatural(realCage(a), realCage(b)) || byNatural(a.mouse, b.mouse) || byNatural(a.id, b.id));
-    const va = val(a), vb = val(b);
-    if (va === null && vb === null) return 0;
-    if (va === null) return 1; // not measured: always last
-    if (vb === null) return -1;
-    return dir * (va - vb) || byNatural(a.id, b.id);
-  });
-}
-
 const mouseCell = (d, id, cage, ended = '') =>
   `<th scope="row"><span class="dot" style="background:${seriesVar(d.cages.indexOf(cage))}"></span>${escapeHtml(id)}${
     ended ? ` <span class="end-mark" title="${escapeHtml(ended)}" aria-label="${escapeHtml(ended)}">✕</span>` : ''}</th>`;
-
-function renderLatestTable(root, d) {
-  const shown = shownCages(d);
-  const rows = sortRows(d, d.latest.filter(r => shown.includes(r.cage)));
-  const cols = tableCols(d);
-  const sub = d.rebased
-    ? 'Change and relative volume are from each mouse’s treatment start; the weight-loss flags stay on its first recorded weight.'
-    : 'Change is from each mouse’s first recorded weight.';
-  const sec = card('table', `Latest values · ${fmtDate(ts(d.latestDate), { month: 'short', day: 'numeric', year: 'numeric' })}`,
-    sub, TABLE_TOOLS, { hint: 'Click a column to sort, a row to highlight the mouse.' });
-  const counts = {};
-  rows.forEach(r => r.flags.forEach(f => { counts[f] = (counts[f] || 0) + 1; }));
-  const summary = Object.keys(FLAGS).filter(f => counts[f])
-    .map(f => `<span class="flag ${FLAGS[f].cls}">${FLAGS[f].icon} ${counts[f]} ${counts[f] > 1 ? 'mice' : 'mouse'} ${FLAGS[f].summary}</span>`);
-  sec.insertAdjacentHTML('beforeend', `<p class="flags-summary">${summary.length ? summary.join(' ') : 'No flags.'}</p>`);
-
-  const { key, dir } = state.prefs.sort;
-  const head = cols.map(c => {
-    const sort = c.key === key ? (dir === 1 ? 'ascending' : 'descending') : 'none';
-    return `<th scope="col" aria-sort="${sort}"><button type="button" data-sort="${c.key}">${c.label}<span class="arrow" aria-hidden="true">${
-      c.key === key ? (dir === 1 ? '▲' : '▼') : ''}</span></button></th>`;
-  }).join('');
-  const body = rows.map(r => {
-    const flags = r.flags.map(f => `<span class="flag ${FLAGS[f].cls}">${FLAGS[f].icon} ${escapeHtml(flagText(r, f))}</span>`).join(' ');
-    const rowCls = FLAG_ORDER.find(f => r.flags.includes(f));
-    const cls = [rowCls ? FLAGS[rowCls].cls : '', r.id === state.focus ? 'focused' : ''].join(' ').trim();
-    return `<tr class="${cls}" data-mouse="${escapeHtml(r.id)}" tabindex="0">${mouseCell(d, r.id, r.cage)}<td class="where">${
-      escapeHtml(placeText(realCage(r), r.mouse))}</td>${
-      cols.slice(2, -1).map(c => `<td>${c.show(r[c.key])}</td>`).join('')}<td>${flags}</td></tr>`;
-  }).join('');
-  sec.insertAdjacentHTML('beforeend', `<div class="table-wrap"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`);
-  root.appendChild(sec);
-  const starts = d.hasStarts;
-  const from = d.rebased ? '_from_start' : '';
-  state.views.table.rows = () => [
-    [...idHead(d), 'tail_mark', ...(starts ? ['treatment_start', 'days_treated'] : []), 'weight_g', `weight_pct_change${from}`, 'tumor_volume',
-      `relative_tumor_volume${from}`, 'last_seen', 'status', 'end_date', 'end_reason', 'flags'],
-    ...rows.map(r => [...idVals(d, r), r.mouse, ...(starts ? [r.start, r.tday] : []), num(r.weight), num(r.pct), num(r.volume), num(r.rtv), r.lastSeen,
-      r.status, r.endDate, r.endReason, r.flags.join(' ')]),
-  ];
-}
-
-// Every mouse × every session, colored by value. Weight change uses a diverging scale (red = loss,
-// blue = gain, full color at ±20%); the others a sequential blue scale over the cells shown.
-function renderHeatmap(root, d) {
-  const metric = state.prefs.heat;
-  const M = METRICS[metric];
-  const shown = shownCages(d);
-  const mice = d.mice.filter(m => shown.includes(m.cage));
-  const key = metric === 'pct' ? 'Red is weight loss, blue is gain; full color at ±20%.' : 'Darker is larger.';
-  const select = `<label class="seg"><span class="seg-label">Show</span><select data-pref-select="heat">${
-    PREF_VALUES.heat.map(v => `<option value="${v}"${v === metric ? ' selected' : ''}>${METRICS[v].name}</option>`).join('')}</select></label>`;
-  const sec = card('grid', 'All measurements', `${M.name} for every mouse and session. ${key}`, TABLE_TOOLS, { extra: select });
-
-  const vals = mice.flatMap(m => m.points.map(p => p[metric])).filter(v => v !== null);
-  const log = M.tumor && state.prefs.scale === 'log';
-  const tf = v => (log ? Math.log(v) : v);
-  const lo = vals.length ? Math.min(...vals.map(tf)) : 0;
-  const hi = vals.length ? Math.max(...vals.map(tf)) : 1;
-  const shade = v => {
-    if (v === null) return '';
-    if (metric === 'pct') {
-      const s = Math.min(1, Math.abs(v) / 20);
-      return `background:color-mix(in oklab, var(${v < 0 ? '--series-8' : '--series-1'}) ${Math.round(4 + 62 * s)}%, var(--surface))`;
-    }
-    const s = hi > lo ? (tf(v) - lo) / (hi - lo) : 0.5;
-    return `background:color-mix(in oklab, var(--series-1) ${Math.round(4 + 62 * s)}%, var(--surface))`;
-  };
-  const colLabel = k => (effX() === 'day' ? `Day ${d.days[k]}` : fmtDate(ts(d.dates[k])));
-  const head = `<th scope="col">Mouse</th>${d.dates.map((date, k) => `<th scope="col" title="${fmtLongDate(date)}">${colLabel(k)}</th>`).join('')}`;
-  let prevCage = null;
-  const body = mice.map(m => {
-    const cells = m.points.map(p => {
-      const v = p[metric];
-      const after = m.ended && p.date > m.endDate;
-      const cls = [metric === 'pct' && v !== null && v <= LOSS_WARNING ? 'strong' : '', p.moved ? 'moved' : '', after ? 'after-end' : ''].filter(Boolean);
-      const text = v === null ? '' : metric === 'pct' ? fmtSigned(v) : v.toFixed(M.digits);
-      const what = after ? endText(m) : v === null ? 'not measured' : M.val(v);
-      const where = placeLong(p.cage, p.mark);
-      const tip = `${m.id}${where ? ` (${where})` : ''} · ${fmtLongDate(p.date)}${p.tday !== null ? ` (treatment day ${p.tday})` : ''}: ${what}${
-        p.moved ? ` · moved from ${placeLong(p.moved.cage, p.moved.mark)}` : ''}`;
-      return `<td style="${after ? '' : shade(v)}"${cls.length ? ` class="${cls.join(' ')}"` : ''} title="${escapeHtml(tip)}">${text}</td>`;
-    }).join('');
-    const cls = [m.cage !== prevCage && prevCage !== null ? 'cage-start' : '', m.id === state.focus ? 'focused' : ''].join(' ').trim();
-    prevCage = m.cage;
-    return `<tr class="${cls}" data-mouse="${escapeHtml(m.id)}" tabindex="0">${mouseCell(d, m.id, m.cage, m.ended ? endText(m) : '')}${cells}</tr>`;
-  }).join('');
-  sec.insertAdjacentHTML('beforeend', `<div class="table-wrap heat"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`);
-  root.appendChild(sec);
-  state.views.grid.rows = () => [
-    [...idHead(d), ...d.dates],
-    ...mice.map(m => [...idVals(d, m), ...m.points.map(p => num(p[metric]))]),
-  ];
-}
 
 // Every mouse × every injection day (from the Injections sheet), the drug in each cell, tinted by group or cage.
 function renderDoses(root, d) {
@@ -2397,13 +2259,17 @@ function renderViews() {
   Chart.defaults.font.family = 'system-ui, -apple-system, "Segoe UI", sans-serif';
   Chart.defaults.font.size = state.chartFont = chartFont();
   Chart.defaults.color = t.ink2;
-  const charts = chartRenderers(d);
-  CHART_IDS.filter(id => !state.prefs.hiddenViews.includes(id)).forEach(id => charts[id](root, t));
-  renderLatestTable(root, d);
-  renderHeatmap(root, d);
-  renderSchedule(root, d);
-  renderDoseCalendar(root, d);
-  renderDoses(root, d);
+  const tab = effTab(d);
+  document.body.dataset.tab = tab;
+  if (tab === 'plots') {
+    const charts = chartRenderers(d);
+    CHART_IDS.filter(id => !state.prefs.hiddenViews.includes(id)).forEach(id => charts[id](root, t));
+  } else {
+    renderSchedule(root, d);
+    renderDoseCalendar(root, d);
+    renderDoses(root, d);
+    if (!root.children.length) root.innerHTML = `<p class="empty-tab">No injections or schedule for the ${d.unit}s shown.</p>`;
+  }
   layoutViews(root);
   renderJump();
   document.querySelectorAll('#views .card-controls').forEach(syncControls);
@@ -2421,14 +2287,12 @@ const GRID_LAYOUTS = {
     [[['weight-latest', 'wl', 2]], 'var(--row-h)'],
     [[['tumor-group', 'tg', 1], ['tumor-mice', 'ti', 1]], 'var(--row-h)'],
     [[['tumor-latest', 'tl', 2]], 'var(--row-h)'],
-    [[['survival', 'surv', 1], ['table', 'tab', 1]], 'calc(var(--row-h) * 1.4)'],
-    [[['grid', 'grid', 2]], 'auto'],
+    [[['survival', 'surv', 2]], 'var(--row-h)'],
   ],
   6: [
     [[['weight-group', 'wg', 2], ['weight-mice', 'wi', 2], ['weight-latest', 'wl', 2]], 'var(--row-h)'],
     [[['tumor-group', 'tg', 2], ['tumor-mice', 'ti', 2], ['tumor-latest', 'tl', 2]], 'var(--row-h)'],
-    [[['survival', 'surv', 2], ['table', 'tab', 4]], 'calc(var(--row-h) * 1.4)'],
-    [[['grid', 'grid', 6]], 'auto'],
+    [[['survival', 'surv', 6]], 'var(--row-h)'],
   ],
 };
 
@@ -2469,25 +2333,49 @@ function setHiddenViews(hidden) {
   renderViews();
 }
 
-/* ------------------------------------------------------------- jump bar */
+/* ------------------------------------------------------------- tabs and jump bar */
 
-// One link per topic, in page order, to the topic's first card present. A topic with no card is left out.
+// Two tabs: the charts, and (when the file has injections or a schedule) Coming up, the calendar and the
+// injections table. Only the active tab's cards are drawn.
+const hasInjectionsTab = d => Boolean(d && ((d.injectionDates && d.injectionDates.length) || d.hasSchedule));
+const effTab = d => (state.prefs.tab === 'injections' && hasInjectionsTab(d) ? 'injections' : 'plots');
+const TABS = [['plots', 'Plots'], ['injections', 'Injections']];
+
+function setTab(tab) {
+  if (!PREF_VALUES.tab.includes(tab) || tab === effTab(state.derived)) return;
+  state.prefs.tab = tab;
+  state.expanded = null;
+  savePrefs();
+  syncToolbar();
+  renderViews();
+  // Start the new tab at its top when the page was scrolled down into the old one.
+  const views = document.getElementById('views');
+  const nav = document.getElementById('jump');
+  const below = nav && !nav.hidden ? nav.getBoundingClientRect().bottom : 0;
+  if (views.getBoundingClientRect().top < below) window.scrollTo({ top: scrollY + views.getBoundingClientRect().top - below - 8 });
+}
+
+// One link per topic of the active tab, in page order, to the topic's first card present. A topic with no card is left out.
 const JUMP = [
   [['weight-group', 'weight-mice', 'weight-latest'], 'Weight'],
   [['tumor-group', 'tumor-mice', 'tumor-latest'], 'Tumor'],
   [['survival'], 'Survival'],
-  [['table'], 'Latest values'],
-  [['grid'], 'All measurements'],
   [['schedule'], 'Coming up'],
-  [['dose-calendar', 'doses'], 'Injections'],
+  [['dose-calendar'], 'Calendar'],
+  [['doses'], 'Table'],
 ];
 
 function renderJump() {
   const nav = document.getElementById('jump');
   if (!nav) return; // an index.html from before the jump bar, still in the offline cache
+  const d = state.derived;
+  const tabs = d && d.dates.length && hasInjectionsTab(d) ? TABS : [];
+  const now = effTab(d);
   const links = JUMP.map(([ids, text]) => [ids.find(id => document.getElementById(id)), text]).filter(([id]) => id);
-  nav.hidden = !links.length;
-  nav.innerHTML = links.map(([id, text]) => `<a href="#${id}" data-jump="${id}">${text}</a>`).join('');
+  nav.hidden = !links.length && !tabs.length;
+  nav.innerHTML = (tabs.length ? `<div class="tabs" role="tablist" aria-label="Tabs">${tabs.map(([v, text]) =>
+    `<button type="button" role="tab" data-tab="${v}" aria-selected="${v === now}">${text}</button>`).join('')}</div>` : '')
+    + links.map(([id, text]) => `<a href="#${id}" data-jump="${id}">${text}</a>`).join('');
   updateJump();
 }
 
@@ -2571,6 +2459,9 @@ function prefControls(d, inToolbar = false) {
   };
 }
 
+// A toolbar control that changes only the charts: hidden on the Injections tab (style.css).
+const plotOnly = html => html.replace(/^(\s*<(?:div|details|label))/, '$1 data-plot-only');
+
 // A control shown only when `when` holds (see ONLY_WHEN).
 const onlyWhen = (when, html) => html.replace('<div class="seg"', `<div class="seg" data-only="${when}"`);
 const ONLY_WHEN = { treat: () => treatMode(), volume: () => state.prefs.tumor === 'volume' };
@@ -2584,8 +2475,6 @@ const CARD_CONTROLS = {
   'tumor-mice': ['tumor', 'scale', 'band', 'x', 'pre', 'tail', 'base', 'focus'],
   'tumor-latest': ['tumor', 'scale', 'band', 'base', 'focus'],
   survival: ['x', 'pre', 'tail'],
-  table: ['base', 'focus'],
-  grid: ['base', 'focus'],
   schedule: [],
   'dose-calendar': ['x', 'focus'],
   doses: ['focus'],
@@ -2609,21 +2498,21 @@ function renderToolbar(d) {
     ${cageChips(d)}
     <button type="button" class="chip more" data-more-settings aria-controls="toolbar-more">More settings</button>
     <div class="toolbar-more" id="toolbar-more">
-    ${c.weight}
-    ${c.tumor}
-    ${c.scale}
-    ${c.band}
-    ${c.error}
+    ${plotOnly(c.weight)}
+    ${plotOnly(c.tumor)}
+    ${plotOnly(c.scale)}
+    ${plotOnly(c.band)}
+    ${plotOnly(c.error)}
     ${c.x}
-    ${c.pre}
-    ${c.tail}
-    ${c.base}
+    ${plotOnly(c.pre)}
+    ${plotOnly(c.tail)}
+    ${plotOnly(c.base)}
     ${c.focus}
     <div class="seg"><span class="seg-label">Theme</span><button type="button" class="chip" data-pref="theme" data-cycle title="Switch between following the device, light and dark"></button></div>
-    ${plotsMenu(d)}
+    ${plotOnly(plotsMenu(d))}
     <details class="menu seg"><summary class="chip">Export</summary><div class="menu-list" role="group" aria-label="Export">
-      <button type="button" data-export="slide" title="Body weight and tumor volume by ${d.unit}, side by side, as a 16:9 slide image">Slide: weight + tumor</button>
-      <button type="button" data-export="png" title="All the charts in one PNG image">Dashboard image</button>
+      <button type="button" data-export="slide" data-plot-only title="Body weight and tumor volume by ${d.unit}, side by side, as a 16:9 slide image">Slide: weight + tumor</button>
+      <button type="button" data-export="png" data-plot-only title="All the charts in one PNG image">Dashboard image</button>
       <button type="button" data-export="csv" title="Every measurement and derived value as CSV, one row per mouse per session">All data (CSV)</button>
       <button type="button" data-export="print" title="Print, or save as PDF">Print</button></div></details>
     </div>`;
@@ -3454,7 +3343,10 @@ async function runExport(kind) {
   if (kind === 'slide') {
     const id = ['weight-group', 'tumor-group'].find(k => state.views[k] && state.views[k].chart);
     if (id) openSlide(id, 'pair'); else toast('No charts to put on a slide yet.');
-  } else if (kind === 'png') download(await canvasBlob(dashboardFigure()), fileName('dashboard', 'png'));
+  } else if (kind === 'png') {
+    if (CHART_IDS.some(id => state.views[id] && state.views[id].chart)) download(await canvasBlob(dashboardFigure()), fileName('dashboard', 'png'));
+    else toast('No charts to put in the image: open the Plots tab.');
+  }
   else if (kind === 'csv') download(new Blob([toCsv(allDataRows())], { type: 'text/csv' }), fileName('data', 'csv'));
   else if (kind === 'print') window.print();
 }
@@ -3629,16 +3521,10 @@ function init() {
     if (el.dataset.pref) setPref(el.dataset.pref, el.dataset.value);
     else if (el.dataset.cage !== undefined) toggleCage(el.dataset.cage);
     else if (el.dataset.cageAll !== undefined) setHidden([]);
+    else if (el.dataset.tab) setTab(el.dataset.tab);
     else if (el.dataset.export) runExport(el.dataset.export);
     else if (el.dataset.tool) runTool(el.closest('section').id, el.dataset.tool);
-    else if (el.dataset.sort) {
-      const s = state.prefs.sort;
-      state.prefs.sort = { key: el.dataset.sort, dir: s.key === el.dataset.sort ? -s.dir : 1 };
-      savePrefs();
-      renderViews();
-      const btn = document.querySelector(`#table [data-sort="${el.dataset.sort}"]`);
-      if (btn) btn.focus();
-    } else if (el.dataset.mouse) setFocus(el.dataset.mouse, true);
+    else if (el.dataset.mouse) setFocus(el.dataset.mouse, true);
   });
   document.addEventListener('dblclick', e => {
     const chip = e.target.closest('[data-cage]');

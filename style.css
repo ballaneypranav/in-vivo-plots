@@ -231,6 +231,21 @@ button:focus-visible, select:focus-visible, tr:focus-visible { outline: 2px soli
 .jump a:hover { background: var(--accent-wash); color: var(--ink); }
 .jump a:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .jump a[aria-current] { background: var(--accent); color: #fff; }
+/* Tabs at the start of the jump bar: Plots, and Injections (schedule, calendar, injections table). */
+.jump .tabs {
+  flex: none; display: inline-flex; gap: 2px; padding: 2px; margin-right: 8px;
+  border: 1px solid var(--border); border-radius: 999px; background: var(--surface);
+}
+.jump .tabs button {
+  min-height: 30px; padding: 0 14px; border: 0; border-radius: 999px;
+  background: transparent; color: var(--ink-2); font: inherit; font-size: 0.85rem; font-weight: 600; cursor: pointer; white-space: nowrap;
+}
+.jump .tabs button:hover { background: var(--accent-wash); color: var(--ink); }
+.jump .tabs button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.jump .tabs button[aria-selected="true"] { background: var(--ink); color: var(--page); }
+/* The chart-only settings and exports are hidden on the Injections tab. */
+body[data-tab="injections"] [data-plot-only] { display: none !important; }
+.empty-tab { color: var(--ink-2); margin: 8px 4px; }
 #views > section { scroll-margin-top: 60px; }
 
 /* Cards */
@@ -271,17 +286,6 @@ main { display: grid; gap: 16px; padding-top: 12px; }
 .chart { position: relative; height: 300px; }
 .empty { color: var(--ink-2); margin: 8px 4px; }
 
-.flags-summary { margin: 0 4px 10px; display: flex; flex-wrap: wrap; gap: 6px; color: var(--ink-2); font-size: 0.875rem; }
-.flag {
-  display: inline-block; white-space: nowrap;
-  padding: 1px 8px; border-radius: 999px; font-size: 0.8rem;
-  border: 1px solid var(--axis); color: var(--ink);
-}
-.flags-summary .flag { white-space: normal; max-width: 100%; border-radius: 12px; } /* the long "ended (…)" pill must wrap on a phone */
-.flag.warning { border-color: var(--warning); background: var(--warning-wash); }
-.flag.critical { border-color: var(--critical); background: var(--critical-wash); }
-.flag.missing { color: var(--ink-2); }
-.flag.ended { color: var(--ink-2); border-style: dashed; }
 .kpi.ended .kpi-value { color: var(--ink-2); }
 .end-mark { color: var(--muted); font-weight: 600; cursor: help; }
 td.where { color: var(--ink-2); text-align: left; }
@@ -507,6 +511,7 @@ body.panel-open::before { content: ""; position: fixed; inset: 0; background: va
   .warnings { margin-top: 8px; padding: 6px 12px; }
   .jump { margin: 8px -20px 0; padding: 4px 20px; }
   .jump a { min-height: 30px; padding: 0 10px; font-size: 0.8rem; }
+  .jump .tabs button { min-height: 26px; padding: 0 12px; font-size: 0.8rem; }
   #views > section { scroll-margin-top: 52px; }
   .toolbar { margin-top: 8px; padding: 6px 12px; gap: 6px 14px; }
   .seg-buttons button { padding: 0 8px; min-height: 30px; font-size: 0.8rem; }
@@ -526,19 +531,15 @@ body.panel-open::before { content: ""; position: fixed; inset: 0; background: va
     --row-h: max(300px, calc((100vh - var(--top, 190px) - 14px - 16px) / 2));
     grid-template-columns: repeat(2, minmax(0, 1fr));
     /* app.js (layoutViews) sets --areas-2 / --rows-2 to leave out the cards that aren't on the page. */
-    grid-template-rows: var(--rows-2, repeat(4, var(--row-h)) calc(var(--row-h) * 1.4) auto);
-    grid-template-areas: var(--areas-2, "wg wi" "wl wl" "tg ti" "tl tl" "surv tab" "grid grid");
+    grid-template-rows: var(--rows-2, repeat(5, var(--row-h)));
+    grid-template-areas: var(--areas-2, "wg wi" "wl wl" "tg ti" "tl tl" "surv surv");
   }
-  /* Survival and the latest-values table share a fixed-height row; the table scrolls inside its card. */
-  #table { display: flex; flex-direction: column; }
-  #table .table-wrap { flex: 1 1 0; min-height: 0; max-height: none; }
   #survival { grid-area: surv; }
   #survival .chart { min-height: 300px; }
   .chart-card { display: flex; flex-direction: column; }
   .chart-card .chart { flex: 1 1 0; min-height: 0; height: auto; }
   #weight-group { grid-area: wg; } #weight-mice { grid-area: wi; } #weight-latest { grid-area: wl; }
   #tumor-group { grid-area: tg; } #tumor-mice { grid-area: ti; } #tumor-latest { grid-area: tl; }
-  #table { grid-area: tab; } #grid { grid-area: grid; }
   #schedule, #doses, #dose-calendar { grid-column: 1 / -1; }
 }
 @media (min-width: 1000px) {
@@ -555,8 +556,8 @@ body.panel-open::before { content: ""; position: fixed; inset: 0; background: va
 @media (min-width: 1500px) {
   #views {
     grid-template-columns: repeat(6, minmax(0, 1fr));
-    grid-template-rows: var(--rows-6, repeat(2, var(--row-h)) calc(var(--row-h) * 1.4) auto);
-    grid-template-areas: var(--areas-6, "wg wg wi wi wl wl" "tg tg ti ti tl tl" "surv surv tab tab tab tab" "grid grid grid grid grid grid");
+    grid-template-rows: var(--rows-6, repeat(3, var(--row-h)));
+    grid-template-areas: var(--areas-6, "wg wg wi wi wl wl" "tg tg ti ti tl tl" "surv surv surv surv surv surv");
   }
 }
 /* Short desktop screens (1366×768): two chart rows can't fit, so give each chart room to read. Up to 900 px tall
@@ -624,8 +625,7 @@ body.slide-open::before { content: ""; position: fixed; inset: 0; background: va
   body.panel-open::before { display: none; }
   #views { display: grid; grid-template-columns: 1fr 1fr; grid-template-areas: none; gap: 8px; }
   #views > section { grid-area: auto; break-inside: avoid; }
-  #views > #table, #views > #grid, #views > #schedule, #views > #doses, #views > #dose-calendar { grid-column: 1 / -1; }
-  #table { display: block; }
+  #views > #schedule, #views > #doses, #views > #dose-calendar { grid-column: 1 / -1; }
   .card .table-wrap { max-height: none; overflow: visible; }
   .card .table-wrap tbody th, .card .table-wrap thead th { position: static; }
   #views { grid-template-rows: none; }

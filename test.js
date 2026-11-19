@@ -659,18 +659,20 @@ test('workbook: staggered starts, Regimens schedule, measurement cadence, binnin
 });
 
 test('dashboard grid: every card gives the full layout; hidden cards leave no gap', () => {
-  const all = [...CHART_IDS, 'table', 'grid'];
+  const all = [...CHART_IDS];
   assert.deepEqual(gridTemplate(2, all), {
-    areas: '"wg wi" "wl wl" "tg ti" "tl tl" "surv tab" "grid grid"',
-    rows: 'var(--row-h) var(--row-h) var(--row-h) var(--row-h) calc(var(--row-h) * 1.4) auto',
+    areas: '"wg wi" "wl wl" "tg ti" "tl tl" "surv surv"',
+    rows: 'var(--row-h) var(--row-h) var(--row-h) var(--row-h) var(--row-h)',
   });
-  assert.equal(gridTemplate(6, all).areas, '"wg wg wi wi wl wl" "tg tg ti ti tl tl" "surv surv tab tab tab tab" "grid grid grid grid grid grid"');
+  assert.equal(gridTemplate(6, all).areas, '"wg wg wi wi wl wl" "tg tg ti ti tl tl" "surv surv surv surv surv surv"');
   const shown = all.filter(id => !HIDDEN_VIEWS.includes(id));
   assert.deepEqual(gridTemplate(2, shown), {
-    areas: '"wg wi" "tg ti" "surv tab" "grid grid"',
-    rows: 'var(--row-h) var(--row-h) calc(var(--row-h) * 1.4) auto',
+    areas: '"wg wi" "tg ti" "surv surv"',
+    rows: 'var(--row-h) var(--row-h) var(--row-h)',
   });
-  assert.equal(gridTemplate(6, shown).areas, '"wg wg wg wi wi wi" "tg tg tg ti ti ti" "surv surv tab tab tab tab" "grid grid grid grid grid grid"');
-  // One card left in a row takes the whole row; a card with nothing to show (no table) gives its row-mate the width.
+  assert.equal(gridTemplate(6, shown).areas, '"wg wg wg wi wi wi" "tg tg tg ti ti ti" "surv surv surv surv surv surv"');
+  // One card left in a row takes the whole row.
   assert.equal(gridTemplate(6, ['weight-mice', 'survival']).areas, '"wi wi wi wi wi wi" "surv surv surv surv surv surv"');
+  // The Injections tab's cards are not in the grid areas: they span the full width (style.css).
+  assert.deepEqual(gridTemplate(2, ['schedule', 'dose-calendar', 'doses']), { areas: 'none', rows: 'none' });
 });
