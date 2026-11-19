@@ -29,12 +29,14 @@ self.addEventListener('activate', event => {
 });
 
 // Network first, so a new version shows on the first visit after it is pushed; the cache when offline, or when
-// the network takes longer than 3 s (the response still refreshes the cache for next time).
+// the network takes longer than 3 s (the response still refreshes the cache for next time). `no-cache` asks the
+// server every time (a 304 when unchanged): GitHub Pages lets the browser keep files 10 minutes, which could pair
+// a new index.html with the old app.js and style.css.
 self.addEventListener('fetch', event => {
   const req = event.request;
   if (req.method !== 'GET' || new URL(req.url).origin !== self.location.origin) return;
   event.respondWith(caches.open(CACHE).then(async cache => {
-    const fresh = fetch(req).then(res => {
+    const fresh = fetch(req, { cache: 'no-cache' }).then(res => {
       if (res.ok) cache.put(req, res.clone());
       return res;
     }).catch(() => null);
