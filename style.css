@@ -527,8 +527,10 @@ body.panel-open::before { content: ""; position: fixed; inset: 0; background: va
   /* The chart rows share the screen height under the header (--top is set by app.js); each chart
      fills whatever its card has left after the title, so cards with taller headers still line up.
      Two columns: each measure's per-mouse bars run full width under its time charts. */
+  /* --fit is how many chart rows share the screen: 2, or 1 when only one row is shown (app.js sets --fit-2 / --fit-6). */
   #views {
-    --row-h: max(300px, calc((100vh - var(--top, 190px) - 14px - 16px) / 2));
+    --fit: var(--fit-2, 2);
+    --row-h: max(300px, calc((100vh - var(--top, 190px) - 14px - (var(--fit) - 1) * 16px) / var(--fit)));
     grid-template-columns: repeat(2, minmax(0, 1fr));
     /* app.js (layoutViews) sets --areas-2 / --rows-2 to leave out the cards that aren't on the page. */
     grid-template-rows: var(--rows-2, repeat(5, var(--row-h)));
@@ -555,6 +557,7 @@ body.panel-open::before { content: ""; position: fixed; inset: 0; background: va
 }
 @media (min-width: 1500px) {
   #views {
+    --fit: var(--fit-6, 2);
     grid-template-columns: repeat(6, minmax(0, 1fr));
     grid-template-rows: var(--rows-6, repeat(3, var(--row-h)));
     grid-template-areas: var(--areas-6, "wg wg wi wi wl wl" "tg tg ti ti tl tl" "surv surv surv surv surv surv");
@@ -563,7 +566,7 @@ body.panel-open::before { content: ""; position: fixed; inset: 0; background: va
 /* Short desktop screens (1366×768): two chart rows can't fit, so give each chart room to read. Up to 900 px tall
    the subtitles keep to one line; 864p and taller keep both rows on screen. */
 @media (min-width: 1000px) and (max-height: 799px) {
-  #views { --row-h: max(380px, calc((100vh - var(--top, 190px) - 14px - 16px) / 2)); }
+  #views { --row-h: max(380px, calc((100vh - var(--top, 190px) - 14px - (var(--fit) - 1) * 16px) / var(--fit))); }
 }
 @media (min-width: 1000px) and (max-height: 900px) {
   .card .sub { -webkit-line-clamp: 1; line-clamp: 1; }

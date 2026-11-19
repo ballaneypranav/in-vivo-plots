@@ -663,16 +663,21 @@ test('dashboard grid: every card gives the full layout; hidden cards leave no ga
   assert.deepEqual(gridTemplate(2, all), {
     areas: '"wg wi" "wl wl" "tg ti" "tl tl" "surv surv"',
     rows: 'var(--row-h) var(--row-h) var(--row-h) var(--row-h) var(--row-h)',
+    fit: 2,
   });
   assert.equal(gridTemplate(6, all).areas, '"wg wg wi wi wl wl" "tg tg ti ti tl tl" "surv surv surv surv surv surv"');
   const shown = all.filter(id => !HIDDEN_VIEWS.includes(id));
   assert.deepEqual(gridTemplate(2, shown), {
     areas: '"wg wi" "tg ti" "surv surv"',
     rows: 'var(--row-h) var(--row-h) var(--row-h)',
+    fit: 2,
   });
   assert.equal(gridTemplate(6, shown).areas, '"wg wg wg wi wi wi" "tg tg tg ti ti ti" "surv surv surv surv surv surv"');
   // One card left in a row takes the whole row.
   assert.equal(gridTemplate(6, ['weight-mice', 'survival']).areas, '"wi wi wi wi wi wi" "surv surv surv surv surv surv"');
   // The Injections tab's cards are not in the grid areas: they span the full width (style.css).
-  assert.deepEqual(gridTemplate(2, ['schedule', 'dose-calendar', 'doses']), { areas: 'none', rows: 'none' });
+  assert.deepEqual(gridTemplate(2, ['schedule', 'dose-calendar', 'doses']), { areas: 'none', rows: 'none', fit: 1 });
+  // A single chart row fills the screen height.
+  assert.equal(gridTemplate(2, ['tumor-group', 'tumor-mice']).fit, 1);
+  assert.equal(gridTemplate(6, ['weight-group', 'tumor-group']).fit, 2);
 });

@@ -2311,7 +2311,8 @@ function gridTemplate(cols, present) {
     });
     rows.push([`"${names.join(' ')}"`, height]);
   }
-  return { areas: rows.map(r => r[0]).join(' ') || 'none', rows: rows.map(r => r[1]).join(' ') || 'none' };
+  return { areas: rows.map(r => r[0]).join(' ') || 'none', rows: rows.map(r => r[1]).join(' ') || 'none',
+    fit: Math.max(1, Math.min(2, rows.length)) }; // chart rows that share the screen height: a lone row fills it
 }
 
 /** Fit the wide-screen grid to the cards on the page (custom properties, so the print layout still wins). */
@@ -2321,6 +2322,7 @@ function layoutViews(root) {
     const g = gridTemplate(cols, present);
     root.style.setProperty(`--areas-${cols}`, g.areas);
     root.style.setProperty(`--rows-${cols}`, g.rows);
+    root.style.setProperty(`--fit-${cols}`, String(g.fit));
   }
 }
 
