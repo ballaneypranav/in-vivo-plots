@@ -8,7 +8,7 @@ const path = require('node:path');
 const {
   parseNote, parseWorkbook, readWorkbookSheets, derive, summarize, tumorVolume, cleanGrouping, applyGroups, distribute, groupLabel,
   studyGrouping, survival, dosesByKey, doseCalendar, UNGROUPED, rebase, summarizeByTreatDay, survivalFromStart, dosesByTreatDay,
-  measureDates, upcomingWork, gridTemplate, CHART_IDS, HIDDEN_VIEWS,
+  measureDates, upcomingWork, splitByDrug, gridTemplate, CHART_IDS, HIDDEN_VIEWS,
 } = require('./app.js');
 
 const demo = fs.readFileSync(path.join(__dirname, 'demo', 'synthetic-demo.md'), 'utf8');
@@ -623,6 +623,16 @@ test('workbook: staggered starts, Regimens schedule, measurement cadence, binnin
   assert.deepEqual(treat.map(z => [z.day, z.eligible, z.items.map(i => `${i.drug} ${i.mice.length}/${i.eligible}`)]), [
     [0, 4, ['X 3/4']], [2, 3, ['x 1/3']], [3, 3, ['X 1/1']], [4, 2, ['Y 1/2']], // day 3 is off schedule: nobody else was due
   ]);
+
+  // The dose strip: one lane per group and drug, in Regimens order (case ignored), each with only its drug's doses.
+  assert.deepEqual(d.drugs, ['X', 'Y', 'PBS', 'Z', 'W']);
+  const split = splitByDrug(dosesByTreatDay(drug, ['Drug'], d.cutoff), d.drugs);
+  assert.deepEqual(split.map(l => [l.key, l.drug, l.doses.map(z => `${z.day}:${z.items.map(i => i.drug).join('+')}`)]), [
+    ['Drug', 'X', ['0:X', '2:x', '3:X']], ['Drug', 'Y', ['4:Y']],
+  ]);
+  assert.equal(split[0].doses[0].eligible, 4, 'a split lane keeps the day\'s eligible count');
+  assert.deepEqual(splitByDrug([{ key: 'A', doses: [{ day: 0, items: [{ drug: 'Q', mice: [] }, { drug: 'Y', mice: [] }] }] }], d.drugs)
+    .map(l => l.drug), ['Y', 'Q'], 'a drug not in Regimens comes after');
 
   // Measurement days and the calendar's planned and missed doses.
   assert.deepEqual(measureDates(d.cadence, d.latestDate, '2026-02-10', '2026-02-16'), ['2026-02-11', '2026-02-13', '2026-02-15']);

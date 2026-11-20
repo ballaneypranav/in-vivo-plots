@@ -683,9 +683,15 @@ function derive(parsed, opts = {}) {
   const hasStarts = mice.some(m => m.start);
   const cadence = parsed.cadence || null;
   const hasSchedule = regimensOf.size > 0 || Boolean(cadence);
+  // The study's drugs, in Regimens row order, then drugs only on Injections by first date (case ignored).
+  const drugs = [];
+  const byDate = [...(parsed.injections || [])].sort((a, b) => a.date.localeCompare(b.date));
+  for (const drug of [...(parsed.regimens || []).map(r => r.drug), ...byDate.map(i => i.drug)]) {
+    if (drug && !drugs.some(x => same(x, drug))) drugs.push(drug);
+  }
   return {
     unit: 'cage', dates, days, latestDate, mice, cages, groups, latest, groupNames, hasRoster: roster.size > 0, injectionDates, hasStarts,
-    cutoff, today: opts.today || null, cadence, hasSchedule,
+    cutoff, today: opts.today || null, cadence, hasSchedule, drugs,
   };
 }
 
@@ -901,6 +907,27 @@ function dosesByTreatDay(mice, keys, asOf = null) {
       return { day, dates: [...byDay.get(day).dates].sort(), eligible, items };
     });
     return { key, doses };
+  });
+}
+
+/**
+ * Dose lanes (from `dosesByKey` or `dosesByTreatDay`) split into one lane per key and drug, for the dose strip:
+ * [{ key, drug, doses }], each key's lanes next to each other in `drugs` order (case ignored; drugs not in `drugs` after,
+ * in the order given). Each dose keeps only that drug's items; lanes with no doses are left out.
+ */
+function splitByDrug(lanes, drugs = []) {
+  const idx = drug => {
+    const k = drugs.findIndex(x => x.toLowerCase() === drug.toLowerCase());
+    return k < 0 ? Infinity : k;
+  };
+  return lanes.flatMap(l => {
+    const names = [];
+    for (const z of l.doses) for (const it of z.items) if (!names.some(x => x.toLowerCase() === it.drug.toLowerCase())) names.push(it.drug);
+    names.sort((a, b) => idx(a) - idx(b));
+    return names.map(drug => ({
+      key: l.key, drug,
+      doses: l.doses.map(z => ({ ...z, items: z.items.filter(it => it.drug.toLowerCase() === drug.toLowerCase()) })).filter(z => z.items.length),
+    }));
   });
 }
 
@@ -1363,14 +1390,30 @@ const doseGap = chart => Math.max(fz(3), fz(6 + 5 + 2) - ((chart.$doseBox?.opts.
 const doseText = it => [it.drug, it.dose, it.volume ? `${it.volume} µL` : '', it.route].filter(Boolean).join(' · ');
 const doseCount = (it, eligible) => (it.mice.length >= eligible ? `${it.mice.length} mice` : `${it.mice.length} of ${eligible} mice`);
 
-function doseTriangle(ctx, x, y, r, filled) {
+// A dose marker of `shape` (see DOSE_SHAPES) centred on x, y, about 2r across; filled, or outlined when only some mice got it.
+function doseMarker(ctx, shape, x, y, r, filled) {
   ctx.beginPath();
-  ctx.moveTo(x, y - r);
-  ctx.lineTo(x + r, y + r * 0.8);
-  ctx.lineTo(x - r, y + r * 0.8);
+  if (shape === 'diamond') {
+    ctx.moveTo(x, y - r * 1.1); ctx.lineTo(x + r * 0.9, y); ctx.lineTo(x, y + r * 1.1); ctx.lineTo(x - r * 0.9, y);
+  } else if (shape === 'square') {
+    ctx.rect(x - r * 0.8, y - r * 0.8, r * 1.6, r * 1.6);
+  } else if (shape === 'circle') {
+    ctx.arc(x, y, r * 0.85, 0, 2 * Math.PI);
+  } else if (shape === 'down') {
+    ctx.moveTo(x, y + r); ctx.lineTo(x + r, y - r * 0.8); ctx.lineTo(x - r, y - r * 0.8);
+  } else if (shape === 'cross') {
+    const a = r * 0.35;
+    ctx.moveTo(x - a, y - r); ctx.lineTo(x + a, y - r); ctx.lineTo(x + a, y - a); ctx.lineTo(x + r, y - a); ctx.lineTo(x + r, y + a);
+    ctx.lineTo(x + a, y + a); ctx.lineTo(x + a, y + r); ctx.lineTo(x - a, y + r); ctx.lineTo(x - a, y + a); ctx.lineTo(x - r, y + a);
+    ctx.lineTo(x - r, y - a); ctx.lineTo(x - a, y - a);
+  } else {
+    ctx.moveTo(x, y - r); ctx.lineTo(x + r, y + r * 0.8); ctx.lineTo(x - r, y + r * 0.8);
+  }
   ctx.closePath();
   if (filled) ctx.fill(); else { ctx.lineWidth = fz(1.5); ctx.stroke(); }
 }
+// Height of the drug key under the lanes (only with more than one drug on the strip).
+const doseKeyRow = opts => ((opts.drugKey || []).length ? fz(16) : 0);
 
 const doseStrip = {
   id: 'doses',
@@ -1381,7 +1424,7 @@ const doseStrip = {
       update(maxWidth) {
         const n = (box.opts.lanes || []).length;
         box.width = maxWidth;
-        box.height = n ? doseGap(chart) + fz(3) + n * doseLane(chart) : 0;
+        box.height = n ? doseGap(chart) + fz(3) + n * doseLane(chart) + doseKeyRow(box.opts) : 0;
       },
       draw() { drawDoseLanes(chart, box); },
     };
@@ -1426,7 +1469,7 @@ const doseStrip = {
     const { ctx, chartArea: a } = chart;
     const px = chart.scales.x.getPixelForValue(at);
     const title = hits[0].dz.title;
-    const lines = hits.flatMap(({ l, dz }) => dz.items.map(it => ({ color: l.color, text: `${l.label}: ${doseText(it)} (${doseCount(it, it.eligible ?? dz.eligible)})` })));
+    const lines = hits.flatMap(({ l, dz }) => dz.items.map(it => ({ color: l.color, shape: l.shape, text: `${l.label}: ${doseText(it)} (${doseCount(it, it.eligible ?? dz.eligible)})` })));
     ctx.save();
     ctx.strokeStyle = o.muted;
     ctx.lineWidth = 1;
@@ -1458,7 +1501,7 @@ const doseStrip = {
     lines.forEach((ln, i) => {
       const y = by + pad + lh * (i + 1) + lh / 2;
       ctx.fillStyle = ln.color;
-      doseTriangle(ctx, bx + pad + 4, y, 4, true);
+      doseMarker(ctx, ln.shape, bx + pad + 4, y, 4, true);
       ctx.fillStyle = o.ink2;
       ctx.fillText(ln.text, bx + pad + 14, y, bw - 2 * pad - 14);
     });
@@ -1473,6 +1516,7 @@ function drawDoseLanes(chart, box) {
   const { ctx, chartArea: a } = chart;
   const x = chart.scales.x;
   const lane = doseLane(chart);
+  const r = fz(doseLaneBase(chart) < 10 ? 3.2 : 4);
   ctx.save();
   const top = box.top + doseGap(chart);
   ctx.font = sysFont(10);
@@ -1491,9 +1535,24 @@ function drawDoseLanes(chart, box) {
       const px = x.getPixelForValue(dz.x);
       if (px < a.left - 1 || px > a.right + 1) continue;
       const all = dz.items.every(it => it.mice.length >= (it.eligible ?? dz.eligible));
-      doseTriangle(ctx, px, cy, fz(doseLaneBase(chart) < 10 ? 3.2 : 4), all);
+      doseMarker(ctx, l.shape, px, cy, r, all);
     }
   });
+  // Drug key: each drug's shape and name, left to right under the lanes.
+  const key = o.drugKey || [];
+  if (key.length) {
+    const ky = top + lanes.length * lane + doseKeyRow(o) / 2 + fz(1);
+    ctx.textAlign = 'left';
+    ctx.font = sysFont(10);
+    let kx = a.left + r;
+    for (const k of key) {
+      if (kx > a.right) break;
+      ctx.fillStyle = o.ink2;
+      doseMarker(ctx, k.shape, kx, ky, r, true);
+      ctx.fillText(k.drug, kx + r + fz(4), ky, Math.max(0, a.right - kx - r - fz(4)));
+      kx += r + fz(4) + ctx.measureText(k.drug).width + fz(14) + r;
+    }
+  }
   ctx.restore();
 }
 
@@ -1661,19 +1720,37 @@ function doseLanes(t, d, shown, metric = null) {
   const place = treat
     ? z => ({ ...z, x: z.day, title: `Dosed on treatment day ${z.day} · ${z.dates.map(x => fmtDate(ts(x))).join(', ')}` })
     : z => ({ ...z, x: xOfDate(d, z.date), title: `Dosed ${fmtLongDate(z.date)} · Day ${daysBetween(d.dates[0], z.date)}` });
-  return (treat ? dosesByTreatDay(d.mice, d.cages, d.cutoff) : dosesByKey(d.mice, d.cages))
-    .map((g, k) => ({ g, k }))
-    .filter(({ g }) => shown.includes(g.key) && g.doses.length)
-    .map(({ g, k }) => ({ label: cageName(d, g.key), color: seriesStyle(t, k).color, doses: g.doses.map(place).filter(z => keep(z.x)) }))
+  const drugs = d.drugs || [];
+  const shapeOf = drug => {
+    const k = drugs.findIndex(x => x.toLowerCase() === drug.toLowerCase());
+    return DOSE_SHAPES[(k < 0 ? drugs.length : k) % DOSE_SHAPES.length];
+  };
+  const all = treat ? dosesByTreatDay(d.mice, d.cages, d.cutoff) : dosesByKey(d.mice, d.cages);
+  return splitByDrug(all.filter(g => shown.includes(g.key)), drugs)
+    .map(g => ({ label: cageName(d, g.key), drug: g.drug, shape: shapeOf(g.drug), color: seriesStyle(t, d.cages.indexOf(g.key)).color,
+      doses: g.doses.map(place).filter(z => keep(z.x)) }))
     .filter(l => l.doses.length);
+}
+
+// One marker shape per drug, in the study's drug order (`d.drugs`).
+const DOSE_SHAPES = ['triangle', 'diamond', 'square', 'circle', 'down', 'cross'];
+const SHAPE_GLYPH = { triangle: '▲', diamond: '◆', square: '■', circle: '●', down: '▼', cross: '✚' };
+// The drugs on the strip with their shapes, when more than one: [{ drug, shape }].
+function doseDrugKey(lanes) {
+  const out = [];
+  for (const l of lanes) if (!out.some(x => x.drug.toLowerCase() === l.drug.toLowerCase())) out.push({ drug: l.drug, shape: l.shape });
+  return out.length > 1 ? out : [];
 }
 
 /** Put the dose strip on a time chart: lanes, and an x axis wide enough for doses outside the sessions. */
 function addDoses(opts, t, d, lanes, extraXs = [], metric = null, ticks = null) {
   opts.plugins.doses.lanes = lanes;
+  opts.plugins.doses.drugKey = doseDrugKey(lanes);
   opts.scales.x = xScale(t, d, [...extraXs, ...lanes.flatMap(l => l.doses.map(z => z.x))], metric, ticks);
 }
-const DOSE_KEY = '▲ dose (tap or hover the strip for the drug)';
+const doseKey = lanes => (doseDrugKey(lanes).length
+  ? 'Dose strip: one lane per group and drug, shape = drug (tap or hover the strip for details)'
+  : `${SHAPE_GLYPH[(lanes[0] && lanes[0].shape) || 'triangle']} dose (tap or hover the strip for the drug)`);
 
 // Legend with one entry per cage; hidden cages are struck through. Clicking an entry shows or hides the cage.
 // On a slide image hidden cages are left out (colors still follow the full cage list).
@@ -1761,7 +1838,7 @@ function renderGroupChart(root, t, d, id, metric, title) {
   const left = treat ? d.mice.filter(m => shown.includes(m.cage) && !m.start).length : 0;
   const sub = `${errName() ? `Mean ± ${errName()}` : 'Mean'} of ${effBase() === 'start' && FROM_START[metric] ? FROM_START[metric].what : what}.${
     treat ? ' Day 0 is each mouse’s treatment start.' : ''}${noStartNote(left)}${
-    noBaselineNote(d, metric, d.mice.filter(m => shown.includes(m.cage)))}${bandNote(metric)}${lanes.length ? ` ${DOSE_KEY}.` : ''}`;
+    noBaselineNote(d, metric, d.mice.filter(m => shown.includes(m.cage)))}${bandNote(metric)}${lanes.length ? ` ${doseKey(lanes)}.` : ''}`;
   const sec = card(id, title, sub, CHART_TOOLS, { hint: `Click a ${d.unit} in the legend to hide it.` });
   root.appendChild(sec);
 
@@ -1849,7 +1926,7 @@ function renderMiceChart(root, t, d, id, metric, title) {
   const lanes = doseLanes(t, d, shown, metric);
   const keep = keepX(d, metric);
   const keys = [mice.some(m => m.points.some(p => p.moved)) && '◆ moved cage', mice.some(m => m.ended) && '✕ ended',
-    lanes.length && DOSE_KEY].filter(Boolean);
+    lanes.length && doseKey(lanes)].filter(Boolean);
   const sub = `One line per mouse.${treat ? ' Day 0 is each mouse’s treatment start.' : ''}${noStartNote(inShown.length - mice.length)}${
     noBaselineNote(d, metric, mice)}${bandNote(metric)}${
     keys.length ? ` ${keys.join(', ')}.` : ''}`;
@@ -2162,7 +2239,7 @@ function renderSurvival(root, t, d) {
   const sub = `Kaplan–Meier. Found dead or euthanized at an endpoint ends the line; euthanized at end of study or removed is censored.${
     ended ? '' : ' No mouse has ended yet.'}${treat ? ' Counted from each mouse’s treatment start.' : ''}${
     left ? ` ${left} ${left > 1 ? 'mice' : 'mouse'} with no treatment start, or ended before it, ${left > 1 ? 'are' : 'is'} left out.` : ''}${
-    lanes.length ? ` ${DOSE_KEY}.` : ''}`;
+    lanes.length ? ` ${doseKey(lanes)}.` : ''}`;
   const sec = card('survival', `Survival by ${d.unit}`, sub, CHART_TOOLS, { hint: `Click a ${d.unit} in the legend to hide it.` });
   root.appendChild(sec);
   state.views.survival.rows = () => (treat ? [
@@ -3605,6 +3682,6 @@ if (typeof module === 'object' && module.exports) {
   module.exports = {
     parseNote, parseWorkbook, readWorkbookSheets, derive, summarize, tumorVolume, cleanGrouping, applyGroups, distribute, groupLabel,
     studyGrouping, survival, dosesByKey, doseCalendar, UNGROUPED, rebase, summarizeByTreatDay, survivalFromStart, dosesByTreatDay,
-    measureDates, upcomingWork, addDays, gridTemplate, CHART_IDS, HIDDEN_VIEWS,
+    measureDates, upcomingWork, addDays, splitByDrug, gridTemplate, CHART_IDS, HIDDEN_VIEWS,
   };
 }
